@@ -9,6 +9,7 @@
 import { Engine } from '@/core/Engine';
 import { SceneManager } from '@/core/SceneManager';
 import { HubScene } from '@/scenes/HubScene';
+import { MirrorDuelScene } from '@/scenes/MirrorDuelScene';
 
 // Import des loaders Babylon.js
 import '@babylonjs/loaders/glTF';
@@ -37,9 +38,8 @@ async function initGame(): Promise<void> {
 
     // Enregistre les scènes
     sceneManager.registerScene('HubScene', HubScene);
-    // Les autres scènes seront enregistrées ici au fur et à mesure
+    sceneManager.registerScene('MirrorDuelScene', MirrorDuelScene);
     // sceneManager.registerScene('NeuroMazeScene', NeuroMazeScene);
-    // sceneManager.registerScene('MirrorDuelScene', MirrorDuelScene);
     // sceneManager.registerScene('MindRushScene', MindRushScene);
 
     console.log('✅ Scènes enregistrées');
@@ -48,6 +48,11 @@ async function initGame(): Promise<void> {
     await sceneManager.loadScene('HubScene');
 
     console.log('✅ HubScene chargée');
+
+    // Connecte la boucle de mise à jour
+    engine.onUpdate((deltaTime) => {
+      sceneManager.update(deltaTime);
+    });
 
     // Démarre la boucle de rendu
     engine.start();

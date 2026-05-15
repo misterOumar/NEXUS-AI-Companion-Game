@@ -9,3 +9,9 @@ export type { DifficultyParams } from './DifficultyManager';
 
 export { EchoAI, AdviceType } from './EchoAI';
 export type { Advice, EchoConfig, EchoMessageCallback } from './EchoAI';
+
+export { InputRecorder } from './InputRecorder';
+export type { RecordedFrame, RecordingStats } from './InputRecorder';
+
+export { CloneBrain, CloneMode } from './CloneBrain';
+export type { CloneDecision } from './CloneBrain';

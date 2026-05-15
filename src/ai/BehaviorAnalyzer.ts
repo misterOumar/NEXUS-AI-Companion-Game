@@ -46,7 +46,7 @@ export class BehaviorAnalyzer {
   private profile: PlayerProfile;
   private actions: PlayerAction[] = [];
   private eventCallbacks: BehaviorEventCallback[] = [];
-  private lastPosition: Vector3 = Vector3.Zero();
+  public lastPosition: Vector3 = Vector3.Zero();
   private lastMoveTime: number = 0;
   private errorCount: Map<string, number> = new Map();
   private hesitationThreshold: number = 1500; // ms

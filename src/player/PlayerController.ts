@@ -3,8 +3,6 @@ import {
   Vector3,
   Mesh,
   MeshBuilder,
-  StandardMaterial,
-  Color3,
   UniversalCamera,
   Ray,
 } from '@babylonjs/core';

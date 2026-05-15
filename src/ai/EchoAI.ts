@@ -145,7 +145,7 @@ export class EchoAI {
   /**
    * Génère un conseil pour une hésitation
    */
-  private generateHesitationAdvice(event: BehaviorEventData): Advice {
+  private generateHesitationAdvice(_event: BehaviorEventData): Advice {
     const messages = {
       friendly: "Prends ton temps, mais n'hésite pas trop !",
       professional: "Pause détectée. Analyse la situation et agis.",
@@ -184,7 +184,6 @@ export class EchoAI {
    * Génère un conseil pour des erreurs répétées
    */
   private generateErrorAdvice(event: BehaviorEventData): Advice {
-    const errorType = event.data?.errorType as string || 'erreur';
     const count = event.data?.count as number || 3;
 
     return {
@@ -297,7 +296,7 @@ export class EchoAI {
   /**
    * Met à jour ECHO (appelé chaque frame)
    */
-  public update(deltaTime: number): void {
+  public update(_deltaTime: number): void {
     if (!this.isActive) return;
 
     this.difficultyManager.update();

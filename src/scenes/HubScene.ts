@@ -2,20 +2,16 @@ import {
   Vector3,
   Color3,
   Color4,
-  HemisphericLight,
-  DirectionalLight,
+  Mesh,
   MeshBuilder,
   StandardMaterial,
   PBRMaterial,
-  Texture,
   GlowLayer,
-  Mesh,
-  Animation,
-  CubeTexture,
-  ShadowGenerator,
+  TransformNode,
 } from '@babylonjs/core';
 import { AbstractScene } from './AbstractScene';
-import { PlayerController } from '@/player/PlayerController';
+import { HubEnvironment } from './HubEnvironment';
+import { ThirdPersonController } from '@/player/ThirdPersonController';
 import { EchoDrone } from '@/player/EchoDrone';
 import { EchoAI, AdviceType } from '@/ai/EchoAI';
 import { HUD } from '@/ui/HUD';
@@ -33,63 +29,70 @@ interface PortalConfig {
   color: Color3;
   sceneName: string;
   description: string;
+  icon: string;
 }
 
 /**
  * HubScene - Le monde central de NEXUS
- * Point de départ du joueur avec accès aux différents mini-jeux
+ * Environnement immersif avec personnage 3ème personne et drone ECHO
  */
 export class HubScene extends AbstractScene {
-  // Composants
-  private playerController!: PlayerController;
+  // Composants principaux
+  private playerController!: ThirdPersonController;
   private echoDrone!: EchoDrone;
   private echoAI!: EchoAI;
+  private environment!: HubEnvironment;
   private hud!: HUD;
   private dialogueBox!: DialogueBox;
   private glowLayer!: GlowLayer;
 
   // Portails
-  private portals: Map<string, Mesh> = new Map();
+  private portals: Map<string, TransformNode> = new Map();
   private portalConfigs: PortalConfig[] = [
     {
       name: 'neuroMaze',
       displayName: 'NeuroMaze',
-      position: new Vector3(-15, 0, 0),
-      color: new Color3(0.2, 0.8, 0.4),
+      position: new Vector3(-18, 0, 0),
+      color: new Color3(0.2, 0.9, 0.4),
       sceneName: 'NeuroMazeScene',
       description: 'Labyrinthe adaptatif',
+      icon: 'maze',
     },
     {
       name: 'mirrorDuel',
       displayName: 'MirrorDuel',
-      position: new Vector3(0, 0, -15),
-      color: new Color3(0.8, 0.3, 0.9),
+      position: new Vector3(0, 0, -18),
+      color: new Color3(0.8, 0.3, 0.95),
       sceneName: 'MirrorDuelScene',
       description: 'Affronte ton clone IA',
+      icon: 'mirror',
     },
     {
       name: 'mindRush',
       displayName: 'MindRush',
-      position: new Vector3(15, 0, 0),
-      color: new Color3(0.9, 0.6, 0.2),
+      position: new Vector3(18, 0, 0),
+      color: new Color3(1, 0.6, 0.2),
       sceneName: 'MindRushScene',
       description: 'Arène de décisions',
+      icon: 'brain',
     },
   ];
 
   // État
   private hasGreeted: boolean = false;
   private nearestPortal: PortalConfig | null = null;
+  private portalCooldown: number = 0;
 
   public async init(): Promise<void> {
     await super.init();
 
-    // Couleur de fond
-    this.scene.clearColor = new Color4(0.02, 0.02, 0.05, 1);
+    // Couleur de fond (ciel nocturne)
+    this.scene.clearColor = new Color4(0.01, 0.01, 0.03, 1);
+    this.scene.ambientColor = new Color3(0.1, 0.1, 0.15);
 
-    // Glow layer pour les effets lumineux
+    // Glow layer global
     this.glowLayer = new GlowLayer('hubGlow', this.scene);
-    this.glowLayer.intensity = 0.6;
+    this.glowLayer.intensity = 0.7;
 
     // Initialise l'IA
     this.echoAI = EchoAI.getInstance();
@@ -97,26 +100,39 @@ export class HubScene extends AbstractScene {
 
   public async loadAssets(): Promise<void> {
     await super.loadAssets();
-    this.updateLoadingProgress(50, 'Chargement des assets...');
+    this.updateLoadingProgress(30, 'Chargement de l\'environnement...');
   }
 
   public async createScene(): Promise<void> {
-    // Lumières
-    this.createLights();
+    this.updateLoadingProgress(40, 'Création de l\'environnement...');
 
-    // Environnement
-    this.createEnvironment();
+    // Crée l'environnement
+    this.environment = new HubEnvironment(this.scene, this.glowLayer);
+    this.environment.create();
 
-    // Portails vers les mini-jeux
+    this.updateLoadingProgress(60, 'Création des portails...');
+
+    // Crée les portails
     this.createPortals();
 
-    // Joueur
-    this.playerController = new PlayerController(this.scene);
-    this.playerController.setPosition(new Vector3(0, 0, 5));
+    this.updateLoadingProgress(70, 'Initialisation du joueur...');
 
-    // Drone ECHO
-    this.echoDrone = new EchoDrone(this.scene);
-    this.echoDrone.setPosition(new Vector3(2, 1.5, 5));
+    // Crée le joueur avec contrôleur 3ème personne
+    this.playerController = new ThirdPersonController(this.scene, {
+      moveSpeed: 5,
+      runSpeed: 10,
+      cameraDistance: 6,
+      cameraHeight: 2.5,
+    });
+    this.playerController.setPosition(new Vector3(0, 0, 8));
+
+    this.updateLoadingProgress(80, 'Initialisation d\'ECHO...');
+
+    // Crée le drone ECHO (utilise le glow layer existant)
+    this.echoDrone = new EchoDrone(this.scene, this.glowLayer);
+    this.echoDrone.setPosition(new Vector3(2, 1.5, 8));
+
+    this.updateLoadingProgress(90, 'Initialisation de l\'interface...');
 
     // UI
     this.hud = new HUD();
@@ -127,158 +143,12 @@ export class HubScene extends AbstractScene {
       this.dialogueBox.showAdvice(advice);
     });
 
-    this.updateLoadingProgress(100, 'Prêt !');
-    this.hideLoadingScreen();
-  }
+    this.updateLoadingProgress(100, 'Bienvenue dans NEXUS !');
 
-  /**
-   * Crée les lumières de la scène
-   */
-  private createLights(): void {
-    // Lumière ambiante
-    const ambient = new HemisphericLight(
-      'ambientLight',
-      new Vector3(0, 1, 0),
-      this.scene
-    );
-    ambient.intensity = 0.3;
-    ambient.diffuse = new Color3(0.6, 0.7, 1);
-    ambient.groundColor = new Color3(0.1, 0.1, 0.2);
-
-    // Lumière directionnelle principale
-    const sun = new DirectionalLight(
-      'sunLight',
-      new Vector3(-0.5, -1, -0.5),
-      this.scene
-    );
-    sun.intensity = 0.8;
-    sun.diffuse = new Color3(1, 0.95, 0.9);
-  }
-
-  /**
-   * Crée l'environnement du hub
-   */
-  private createEnvironment(): void {
-    // Sol principal
-    const ground = MeshBuilder.CreateGround('ground', {
-      width: 60,
-      height: 60,
-      subdivisions: 20,
-    }, this.scene);
-
-    const groundMat = new PBRMaterial('groundMat', this.scene);
-    groundMat.albedoColor = new Color3(0.08, 0.08, 0.12);
-    groundMat.metallic = 0.3;
-    groundMat.roughness = 0.8;
-    ground.material = groundMat;
-    ground.receiveShadows = true;
-
-    // Grille au sol pour effet futuriste
-    this.createGridLines();
-
-    // Plateforme centrale
-    const platform = MeshBuilder.CreateCylinder('platform', {
-      diameter: 8,
-      height: 0.3,
-      tessellation: 32,
-    }, this.scene);
-    platform.position.y = 0.15;
-
-    const platformMat = new PBRMaterial('platformMat', this.scene);
-    platformMat.albedoColor = new Color3(0.15, 0.15, 0.25);
-    platformMat.metallic = 0.5;
-    platformMat.roughness = 0.4;
-    platformMat.emissiveColor = new Color3(0.1, 0.15, 0.3);
-    platform.material = platformMat;
-
-    // Piliers décoratifs
-    this.createPillars();
-
-    // Skybox simple (gradient)
-    this.createSkybox();
-  }
-
-  /**
-   * Crée les lignes de grille au sol
-   */
-  private createGridLines(): void {
-    const gridMat = new StandardMaterial('gridMat', this.scene);
-    gridMat.emissiveColor = new Color3(0.1, 0.2, 0.4);
-    gridMat.alpha = 0.5;
-
-    const gridSize = 60;
-    const spacing = 2;
-
-    for (let i = -gridSize / 2; i <= gridSize / 2; i += spacing) {
-      // Lignes X
-      const lineX = MeshBuilder.CreateBox(`gridX${i}`, {
-        width: gridSize,
-        height: 0.02,
-        depth: 0.05,
-      }, this.scene);
-      lineX.position = new Vector3(0, 0.01, i);
-      lineX.material = gridMat;
-
-      // Lignes Z
-      const lineZ = MeshBuilder.CreateBox(`gridZ${i}`, {
-        width: 0.05,
-        height: 0.02,
-        depth: gridSize,
-      }, this.scene);
-      lineZ.position = new Vector3(i, 0.01, 0);
-      lineZ.material = gridMat;
-    }
-  }
-
-  /**
-   * Crée les piliers décoratifs
-   */
-  private createPillars(): void {
-    const pillarPositions = [
-      new Vector3(-20, 0, -20),
-      new Vector3(20, 0, -20),
-      new Vector3(-20, 0, 20),
-      new Vector3(20, 0, 20),
-    ];
-
-    const pillarMat = new PBRMaterial('pillarMat', this.scene);
-    pillarMat.albedoColor = new Color3(0.1, 0.1, 0.15);
-    pillarMat.metallic = 0.7;
-    pillarMat.roughness = 0.3;
-
-    pillarPositions.forEach((pos, i) => {
-      const pillar = MeshBuilder.CreateCylinder(`pillar${i}`, {
-        diameter: 1,
-        height: 8,
-        tessellation: 8,
-      }, this.scene);
-      pillar.position = pos.add(new Vector3(0, 4, 0));
-      pillar.material = pillarMat;
-
-      // Lumière au sommet
-      const light = MeshBuilder.CreateSphere(`pillarLight${i}`, {
-        diameter: 0.5,
-      }, this.scene);
-      light.position = pos.add(new Vector3(0, 8.5, 0));
-
-      const lightMat = new StandardMaterial(`pillarLightMat${i}`, this.scene);
-      lightMat.emissiveColor = new Color3(0.3, 0.5, 1);
-      light.material = lightMat;
-      this.glowLayer.addIncludedOnlyMesh(light);
-    });
-  }
-
-  /**
-   * Crée le skybox
-   */
-  private createSkybox(): void {
-    const skybox = MeshBuilder.CreateBox('skyBox', { size: 500 }, this.scene);
-    const skyboxMaterial = new StandardMaterial('skyBoxMat', this.scene);
-    skyboxMaterial.backFaceCulling = false;
-    skyboxMaterial.disableLighting = true;
-    skyboxMaterial.emissiveColor = new Color3(0.02, 0.02, 0.08);
-    skybox.material = skyboxMaterial;
-    skybox.infiniteDistance = true;
+    // Masque l'écran de chargement après un court délai
+    setTimeout(() => {
+      this.hideLoadingScreen();
+    }, 500);
   }
 
   /**
@@ -292,97 +162,191 @@ export class HubScene extends AbstractScene {
   }
 
   /**
-   * Crée un portail individuel
+   * Crée un portail individuel amélioré
    */
-  private createPortal(config: PortalConfig): Mesh {
-    // Groupe parent
-    const portalGroup = new Mesh(`portal_${config.name}`, this.scene);
+  private createPortal(config: PortalConfig): TransformNode {
+    const portalGroup = new TransformNode(`portal_${config.name}`, this.scene);
     portalGroup.position = config.position;
 
-    // Anneau du portail
-    const ring = MeshBuilder.CreateTorus(`portalRing_${config.name}`, {
-      diameter: 4,
-      thickness: 0.3,
-      tessellation: 32,
-    }, this.scene);
-    ring.rotation.x = Math.PI / 2;
-    ring.parent = portalGroup;
-
-    const ringMat = new StandardMaterial(`portalRingMat_${config.name}`, this.scene);
-    ringMat.emissiveColor = config.color;
-    ring.material = ringMat;
-    this.glowLayer.addIncludedOnlyMesh(ring);
-
-    // Surface du portail (effet de vortex simplifié)
-    const surface = MeshBuilder.CreateDisc(`portalSurface_${config.name}`, {
-      radius: 1.8,
-      tessellation: 32,
-    }, this.scene);
-    surface.rotation.x = Math.PI / 2;
-    surface.position.y = 0.1;
-    surface.parent = portalGroup;
-
-    const surfaceMat = new StandardMaterial(`portalSurfaceMat_${config.name}`, this.scene);
-    surfaceMat.emissiveColor = config.color.scale(0.5);
-    surfaceMat.alpha = 0.6;
-    surfaceMat.backFaceCulling = false;
-    surface.material = surfaceMat;
-
-    // Animation de rotation
-    const rotateAnim = new Animation(
-      'portalRotate',
-      'rotation.y',
-      30,
-      Animation.ANIMATIONTYPE_FLOAT,
-      Animation.ANIMATIONLOOPMODE_CYCLE
-    );
-    rotateAnim.setKeys([
-      { frame: 0, value: 0 },
-      { frame: 120, value: Math.PI * 2 },
-    ]);
-    surface.animations.push(rotateAnim);
-    this.scene.beginAnimation(surface, 0, 120, true);
-
-    // Socle
+    // Base du portail
     const base = MeshBuilder.CreateCylinder(`portalBase_${config.name}`, {
-      diameter: 5,
-      height: 0.2,
-      tessellation: 32,
+      diameter: 6,
+      height: 0.4,
+      tessellation: 48,
     }, this.scene);
-    base.position.y = -0.1;
+    base.position.y = 0.2;
     base.parent = portalGroup;
+    base.checkCollisions = true;
 
     const baseMat = new PBRMaterial(`portalBaseMat_${config.name}`, this.scene);
-    baseMat.albedoColor = new Color3(0.1, 0.1, 0.15);
-    baseMat.metallic = 0.6;
+    baseMat.albedoColor = new Color3(0.08, 0.08, 0.12);
+    baseMat.metallic = 0.7;
     baseMat.roughness = 0.3;
     base.material = baseMat;
 
-    // Label du portail (texte 3D simplifié avec un plane)
-    this.createPortalLabel(config, portalGroup);
+    // Anneau principal
+    const mainRing = MeshBuilder.CreateTorus(`portalMainRing_${config.name}`, {
+      diameter: 5,
+      thickness: 0.25,
+      tessellation: 64,
+    }, this.scene);
+    mainRing.position.y = 2.5;
+    mainRing.rotation.x = Math.PI / 2;
+    mainRing.parent = portalGroup;
+
+    const ringMat = new StandardMaterial(`portalRingMat_${config.name}`, this.scene);
+    ringMat.emissiveColor = config.color;
+    ringMat.diffuseColor = config.color.scale(0.5);
+    mainRing.material = ringMat;
+    this.glowLayer.addIncludedOnlyMesh(mainRing);
+
+    // Anneau secondaire
+    const secondRing = MeshBuilder.CreateTorus(`portalSecondRing_${config.name}`, {
+      diameter: 4.5,
+      thickness: 0.12,
+      tessellation: 48,
+    }, this.scene);
+    secondRing.position.y = 2.5;
+    secondRing.rotation.x = Math.PI / 2;
+    secondRing.parent = portalGroup;
+
+    const secondRingMat = new StandardMaterial(`portalSecondRingMat_${config.name}`, this.scene);
+    secondRingMat.emissiveColor = config.color.scale(0.6);
+    secondRingMat.alpha = 0.7;
+    secondRing.material = secondRingMat;
+    this.glowLayer.addIncludedOnlyMesh(secondRing);
+
+    // Surface du portail (vortex)
+    const surface = MeshBuilder.CreateDisc(`portalSurface_${config.name}`, {
+      radius: 2.2,
+      tessellation: 48,
+    }, this.scene);
+    surface.position.y = 2.5;
+    surface.rotation.x = Math.PI / 2;
+    surface.parent = portalGroup;
+
+    const surfaceMat = new StandardMaterial(`portalSurfaceMat_${config.name}`, this.scene);
+    surfaceMat.emissiveColor = config.color.scale(0.4);
+    surfaceMat.alpha = 0.5;
+    surfaceMat.backFaceCulling = false;
+    surface.material = surfaceMat;
+
+    // Piliers
+    this.createPortalPillars(portalGroup, config);
+
+    // Animations
+    this.scene.registerBeforeRender(() => {
+      const time = performance.now() / 1000;
+      mainRing.rotation.z = time * 0.3;
+      secondRing.rotation.z = -time * 0.5;
+      surface.rotation.z = time * 0.2;
+
+      // Pulsation
+      const pulse = 1 + Math.sin(time * 2) * 0.05;
+      mainRing.scaling.setAll(pulse);
+    });
+
+    // Icône centrale
+    this.createPortalIcon(portalGroup, config);
 
     return portalGroup;
   }
 
   /**
-   * Crée le label d'un portail
+   * Crée les piliers du portail
    */
-  private createPortalLabel(config: PortalConfig, parent: Mesh): void {
-    // Pour l'instant, on utilise juste un mesh texte basique
-    // Dans une version complète, on utiliserait DynamicTexture ou TextMesh
-    const labelPlane = MeshBuilder.CreatePlane(`portalLabel_${config.name}`, {
-      width: 3,
-      height: 0.5,
-    }, this.scene);
-    labelPlane.position = new Vector3(0, 3, 0);
-    labelPlane.billboardMode = Mesh.BILLBOARDMODE_ALL;
-    labelPlane.parent = parent;
+  private createPortalPillars(parent: TransformNode, config: PortalConfig): void {
+    const pillarPositions = [
+      new Vector3(-2.8, 0, 0),
+      new Vector3(2.8, 0, 0),
+    ];
 
-    const labelMat = new StandardMaterial(`portalLabelMat_${config.name}`, this.scene);
-    labelMat.emissiveColor = config.color;
-    labelMat.alpha = 0.9;
-    labelMat.backFaceCulling = false;
-    labelPlane.material = labelMat;
+    pillarPositions.forEach((pos, index) => {
+      // Pilier
+      const pillar = MeshBuilder.CreateCylinder(`pillar_${config.name}_${index}`, {
+        height: 5.5,
+        diameterTop: 0.3,
+        diameterBottom: 0.5,
+        tessellation: 12,
+      }, this.scene);
+      pillar.position = pos.clone();
+      pillar.position.y = 2.75;
+      pillar.parent = parent;
+      pillar.checkCollisions = true;
+
+      const pillarMat = new PBRMaterial(`pillarMat_${config.name}_${index}`, this.scene);
+      pillarMat.albedoColor = new Color3(0.1, 0.1, 0.15);
+      pillarMat.metallic = 0.8;
+      pillarMat.roughness = 0.3;
+      pillar.material = pillarMat;
+
+      // Ornement lumineux
+      const ornament = MeshBuilder.CreateSphere(`ornament_${config.name}_${index}`, {
+        diameter: 0.4,
+      }, this.scene);
+      ornament.position = pos.clone();
+      ornament.position.y = 5.3;
+      ornament.parent = parent;
+
+      const ornamentMat = new StandardMaterial(`ornamentMat_${config.name}_${index}`, this.scene);
+      ornamentMat.emissiveColor = config.color;
+      ornament.material = ornamentMat;
+      this.glowLayer.addIncludedOnlyMesh(ornament);
+    });
+  }
+
+  /**
+   * Crée l'icône centrale du portail
+   */
+  private createPortalIcon(parent: TransformNode, config: PortalConfig): void {
+    let icon: Mesh;
+
+    switch (config.icon) {
+      case 'maze':
+        // Icône labyrinthe : grille
+        icon = MeshBuilder.CreateBox(`icon_${config.name}`, {
+          size: 0.8,
+        }, this.scene);
+        icon.rotation.x = Math.PI / 4;
+        icon.rotation.y = Math.PI / 4;
+        break;
+
+      case 'mirror':
+        // Icône miroir : double octaèdre
+        icon = MeshBuilder.CreatePolyhedron(`icon_${config.name}`, {
+          type: 1, // Octahedron
+          size: 0.4,
+        }, this.scene);
+        break;
+
+      case 'brain':
+        // Icône cerveau : sphère
+        icon = MeshBuilder.CreateSphere(`icon_${config.name}`, {
+          diameter: 0.8,
+          segments: 16,
+        }, this.scene);
+        break;
+
+      default:
+        icon = MeshBuilder.CreateSphere(`icon_${config.name}`, {
+          diameter: 0.6,
+        }, this.scene);
+    }
+
+    icon.position.y = 2.5;
+    icon.parent = parent;
+
+    const iconMat = new StandardMaterial(`iconMat_${config.name}`, this.scene);
+    iconMat.emissiveColor = config.color;
+    iconMat.wireframe = true;
+    icon.material = iconMat;
+
+    this.glowLayer.addIncludedOnlyMesh(icon);
+
+    // Animation de rotation
+    this.scene.registerBeforeRender(() => {
+      icon.rotation.y += 0.02;
+    });
   }
 
   /**
@@ -394,18 +358,20 @@ export class HubScene extends AbstractScene {
 
     // Met à jour le drone ECHO
     const playerPos = this.playerController.getPosition();
-    const playerRot = this.playerController.getMesh().rotation.y;
+    const playerRot = this.playerController.getRotation();
     this.echoDrone.update(deltaTime, playerPos, playerRot);
 
     // Met à jour l'IA
     this.echoAI.update(deltaTime);
 
-    // Met à jour les inputs
-    this.inputManager.update();
-
     // Met à jour le HUD
     const engine = Engine.getInstance();
     this.hud.updateFPS(engine.getFPS());
+
+    // Cooldown des portails
+    if (this.portalCooldown > 0) {
+      this.portalCooldown -= deltaTime;
+    }
 
     // Vérifie la proximité des portails
     this.checkPortalProximity(playerPos);
@@ -414,33 +380,42 @@ export class HubScene extends AbstractScene {
     if (!this.hasGreeted) {
       this.greetPlayer();
     }
+
+    // Efface les états "just pressed" EN DERNIER — après toutes les vérifications
+    this.inputManager.update();
   }
 
   /**
    * Vérifie si le joueur est proche d'un portail
    */
   private checkPortalProximity(playerPos: Vector3): void {
-    const interactionDistance = 5;
+    const interactionDistance = 6;
     let nearest: PortalConfig | null = null;
     let nearestDist = Infinity;
 
-    this.portalConfigs.forEach((config) => {
+    for (const config of this.portalConfigs) {
       const dist = Vector3.Distance(playerPos, config.position);
       if (dist < interactionDistance && dist < nearestDist) {
         nearest = config;
         nearestDist = dist;
       }
-    });
+    }
 
     // Si on vient d'entrer dans la zone d'un portail
-    if (nearest && nearest !== this.nearestPortal) {
+    if (nearest && nearest !== this.nearestPortal && this.portalCooldown <= 0) {
       this.echoAI.say(
-        `${nearest.displayName} - ${nearest.description}. Approche-toi pour entrer.`,
+        `${nearest.displayName} - ${nearest.description}. Appuie sur E pour entrer.`,
         AdviceType.TIP
       );
+      this.portalCooldown = 3; // Cooldown de 3 secondes
     }
 
     this.nearestPortal = nearest;
+
+    // Affiche l'indicateur d'interaction
+    if (nearest) {
+      this.hud.showNotification(`[E] ${nearest.displayName}`, 100);
+    }
 
     // Interaction avec E
     if (nearest && this.inputManager.isKeyJustPressed('e')) {
@@ -451,15 +426,18 @@ export class HubScene extends AbstractScene {
   /**
    * Entre dans un portail
    */
-  private async enterPortal(config: PortalConfig): Promise<void> {
-    this.echoAI.say(`Allons-y ! Direction ${config.displayName}.`, AdviceType.ENCOURAGEMENT);
+  private enterPortal(config: PortalConfig): void {
+    this.echoAI.say(
+      `Excellent choix ! ${config.displayName} va tester tes capacités. Prépare-toi !`,
+      AdviceType.ENCOURAGEMENT
+    );
 
-    // Ici on chargerait la scène correspondante
-    // const sceneManager = SceneManager.getInstance();
-    // await sceneManager.loadScene(config.sceneName);
-
-    // Pour l'instant, juste un message
-    this.hud.showNotification(`${config.displayName} - Bientôt disponible !`, 3000);
+    // Petit délai (400ms) pour laisser ECHO parler — le SceneManager gère ensuite le fade noir
+    setTimeout(() => {
+      SceneManager.getInstance().loadScene(config.sceneName).catch((err) => {
+        console.error(`Impossible de charger ${config.sceneName}:`, err);
+      });
+    }, 400);
   }
 
   /**
@@ -468,11 +446,19 @@ export class HubScene extends AbstractScene {
   private greetPlayer(): void {
     setTimeout(() => {
       this.echoAI.say(
-        "Bienvenue dans NEXUS ! Je suis ECHO, ton compagnon IA. Explore le hub et choisis un mini-jeu.",
-        AdviceType.ENCOURAGEMENT
+        "Bienvenue dans NEXUS ! Je suis ECHO, ton compagnon IA. Utilise WASD pour te déplacer et la souris pour regarder autour de toi. Les portails mènent aux différents mini-jeux.",
+        AdviceType.TIP
       );
       this.hasGreeted = true;
-    }, 1500);
+
+      // Second message après quelques secondes
+      setTimeout(() => {
+        this.echoAI.say(
+          "Je vais analyser ton style de jeu pour t'aider à t'améliorer. Approche-toi d'un portail pour commencer !",
+          AdviceType.OBSERVATION
+        );
+      }, 8000);
+    }, 2000);
   }
 
   /**
@@ -502,6 +488,7 @@ export class HubScene extends AbstractScene {
   public async dispose(): Promise<void> {
     this.playerController.dispose();
     this.echoDrone.dispose();
+    this.environment.dispose();
     this.hud.dispose();
     this.dialogueBox.dispose();
     this.glowLayer.dispose();

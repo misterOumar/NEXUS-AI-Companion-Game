@@ -11,7 +11,7 @@ export interface SceneTransitionOptions {
 
 /**
  * Gestionnaire du cycle de vie des scènes
- * Gère les transitions et le chargement/déchargement des scènes
+ * Gère les transitions (fade noir) et le chargement/déchargement des scènes
  */
 export class SceneManager {
   private static instance: SceneManager | null = null;
@@ -20,12 +20,10 @@ export class SceneManager {
   private currentScene: AbstractScene | null = null;
   private currentSceneName: string = '';
   private isTransitioning: boolean = false;
+  private fadeOverlay: HTMLDivElement | null = null;
 
   private constructor() {}
 
-  /**
-   * Récupère l'instance singleton
-   */
   public static getInstance(): SceneManager {
     if (!SceneManager.instance) {
       SceneManager.instance = new SceneManager();
@@ -33,19 +31,54 @@ export class SceneManager {
     return SceneManager.instance;
   }
 
-  /**
-   * Enregistre une scène avec un nom
-   */
   public registerScene(name: string, sceneClass: SceneConstructor): void {
     this.scenes.set(name, sceneClass);
   }
 
-  /**
-   * Charge et affiche une scène
-   */
+  // ─── Overlay de transition ───────────────────────────────────────────────
+
+  private getOverlay(): HTMLDivElement {
+    if (!this.fadeOverlay) {
+      this.fadeOverlay = document.createElement('div');
+      this.fadeOverlay.style.cssText = [
+        'position:fixed', 'top:0', 'left:0', 'width:100%', 'height:100%',
+        'background:#000', 'opacity:0', 'pointer-events:none',
+        'z-index:9999', 'transition:opacity 0.45s ease',
+      ].join(';');
+      document.body.appendChild(this.fadeOverlay);
+    }
+    return this.fadeOverlay;
+  }
+
+  private fadeToBlack(duration = 450): Promise<void> {
+    return new Promise(resolve => {
+      const el = this.getOverlay();
+      el.style.transition = `opacity ${duration}ms ease`;
+      el.style.pointerEvents = 'all';
+      // Force reflow pour que la transition CSS démarre bien
+      void el.offsetHeight;
+      el.style.opacity = '1';
+      setTimeout(resolve, duration + 30);
+    });
+  }
+
+  private fadeFromBlack(duration = 450): Promise<void> {
+    return new Promise(resolve => {
+      const el = this.getOverlay();
+      el.style.transition = `opacity ${duration}ms ease`;
+      el.style.opacity = '0';
+      setTimeout(() => {
+        el.style.pointerEvents = 'none';
+        resolve();
+      }, duration + 30);
+    });
+  }
+
+  // ─── Chargement de scène ─────────────────────────────────────────────────
+
   public async loadScene(
     name: string,
-    options: SceneTransitionOptions = {}
+    _options: SceneTransitionOptions = {}
   ): Promise<void> {
     if (this.isTransitioning) {
       console.warn('Scene transition already in progress');
@@ -60,22 +93,19 @@ export class SceneManager {
     this.isTransitioning = true;
 
     try {
+      // Fondu au noir
+      await this.fadeToBlack();
+
       // Décharge la scène actuelle
       if (this.currentScene) {
         await this.currentScene.dispose();
         this.currentScene = null;
       }
 
-      // Crée la nouvelle scène
+      // Crée, initialise et construit la nouvelle scène
       const newScene = new SceneClass();
-
-      // Initialise la scène
       await newScene.init();
-
-      // Charge les assets
       await newScene.loadAssets();
-
-      // Crée la scène Babylon
       await newScene.createScene();
 
       // Définit la scène active dans le moteur
@@ -85,48 +115,39 @@ export class SceneManager {
       this.currentScene = newScene;
       this.currentSceneName = name;
 
+      // Fondu depuis le noir
+      await this.fadeFromBlack();
+
     } finally {
       this.isTransitioning = false;
     }
   }
 
-  /**
-   * Retourne la scène actuelle
-   */
   public getCurrentScene(): AbstractScene | null {
     return this.currentScene;
   }
 
-  /**
-   * Retourne le nom de la scène actuelle
-   */
   public getCurrentSceneName(): string {
     return this.currentSceneName;
   }
 
-  /**
-   * Met à jour la scène actuelle (appelé chaque frame)
-   */
   public update(deltaTime: number): void {
     if (this.currentScene && !this.isTransitioning) {
       this.currentScene.update(deltaTime);
     }
   }
 
-  /**
-   * Vérifie si une transition est en cours
-   */
   public isInTransition(): boolean {
     return this.isTransitioning;
   }
 
-  /**
-   * Libère les ressources
-   */
   public async dispose(): Promise<void> {
     if (this.currentScene) {
       await this.currentScene.dispose();
       this.currentScene = null;
+    }
+    if (this.fadeOverlay?.parentNode) {
+      this.fadeOverlay.parentNode.removeChild(this.fadeOverlay);
     }
     this.scenes.clear();
     SceneManager.instance = null;

@@ -32,7 +32,7 @@ export class DifficultyManager {
 
   // Hystérésis pour éviter les oscillations
   private readonly smoothingFactor: number = 0.05;
-  private readonly changeThreshold: number = 0.15;
+  public readonly changeThreshold: number = 0.15;
 
   // Compteurs pour l'adaptation
   private successCount: number = 0;

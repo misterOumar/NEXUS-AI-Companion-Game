@@ -3,7 +3,6 @@ import {
   TextBlock,
   Rectangle,
   Control,
-  StackPanel,
 } from '@babylonjs/gui';
 
 /**
@@ -16,17 +15,14 @@ export class HUD {
   // Éléments UI
   private fpsText: TextBlock;
   private instructionsPanel: Rectangle;
-  private instructionsText: TextBlock;
-  private crosshair: Rectangle;
 
   constructor() {
     this.ui = AdvancedDynamicTexture.CreateFullscreenUI('hudUI');
 
     this.fpsText = this.createFPSCounter();
-    this.crosshair = this.createCrosshair();
+    this.createCrosshair();
     const instructions = this.createInstructions();
     this.instructionsPanel = instructions.panel;
-    this.instructionsText = instructions.text;
   }
 
   /**
@@ -65,7 +61,7 @@ export class HUD {
   /**
    * Crée le panneau d'instructions
    */
-  private createInstructions(): { panel: Rectangle; text: TextBlock } {
+  private createInstructions(): { panel: Rectangle } {
     const panel = new Rectangle('instructionsPanel');
     panel.width = '300px';
     panel.height = '120px';
@@ -89,7 +85,7 @@ export class HUD {
     text.paddingTop = '10px';
     panel.addControl(text);
 
-    return { panel, text };
+    return { panel };
   }
 
   /**
@@ -129,7 +125,7 @@ export class HUD {
   /**
    * Affiche l'indicateur d'interaction
    */
-  public showInteractionPrompt(text: string): void {
+  public showInteractionPrompt(_text: string): void {
     // À implémenter : indicateur "Appuyez sur E pour interagir"
   }
 

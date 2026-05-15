@@ -23,8 +23,8 @@ export class InputManager {
   private static instance: InputManager | null = null;
 
   private state: InputState;
-  private previousMousePosition: Vector2;
-  private scene: Scene | null = null;
+  public previousMousePosition: Vector2;
+  public currentScene: Scene | null = null;
 
   private constructor() {
     this.state = {
@@ -55,7 +55,7 @@ export class InputManager {
    * Attache le gestionnaire à une scène Babylon
    */
   public attachToScene(scene: Scene): void {
-    this.scene = scene;
+    this.currentScene = scene;
 
     // Événements clavier
     scene.onKeyboardObservable.add((kbInfo) => {
@@ -94,7 +94,7 @@ export class InputManager {
         this.state.mouseButtons.delete(event.button);
         this.state.mouseButtonsJustReleased.add(event.button);
       } else if (pointerInfo.type === PointerEventTypes.POINTERWHEEL) {
-        const wheelEvent = event as WheelEvent;
+        const wheelEvent = event as unknown as WheelEvent;
         this.state.wheelDelta = wheelEvent.deltaY;
       }
     });

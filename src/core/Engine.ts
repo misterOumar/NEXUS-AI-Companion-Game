@@ -17,6 +17,7 @@ export class Engine {
   private canvas: HTMLCanvasElement;
   private currentScene: Scene | null = null;
   private isRunning: boolean = false;
+  private updateCallback: ((deltaTime: number) => void) | null = null;
 
   private constructor(config: EngineConfig) {
     const canvas = document.getElementById(config.canvasId) as HTMLCanvasElement;
@@ -80,6 +81,13 @@ export class Engine {
   }
 
   /**
+   * Enregistre un callback appelé à chaque frame avant le rendu
+   */
+  public onUpdate(callback: (deltaTime: number) => void): void {
+    this.updateCallback = callback;
+  }
+
+  /**
    * Démarre la boucle de rendu
    */
   public start(): void {
@@ -88,6 +96,14 @@ export class Engine {
     this.isRunning = true;
     this.babylonEngine.runRenderLoop(() => {
       if (this.currentScene) {
+        const deltaTime = this.getDeltaTime();
+
+        // Met à jour la logique du jeu
+        if (this.updateCallback) {
+          this.updateCallback(deltaTime);
+        }
+
+        // Rendu de la scène
         this.currentScene.render();
       }
     });
