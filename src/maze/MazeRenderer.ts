@@ -1,0 +1,490 @@
+import {
+  Scene, Mesh, MeshBuilder, PBRMaterial, StandardMaterial,
+  Color3, Color4, Vector3, GlowLayer, Animation, CubicEase,
+  EasingFunction, HemisphericLight, DirectionalLight, PointLight,
+  ParticleSystem, DynamicTexture, TransformNode, DefaultRenderingPipeline,
+  Observer,
+} from '@babylonjs/core';
+import type { MazeCell } from './MazeGenerator';
+
+// ─── Palette néon ──────────────────────────────────────────────────────────────
+const C_WALL_EMI   = new Color3(0.05, 0.35, 0.90);
+const C_WALL_ALB   = new Color3(0.04, 0.04, 0.10);
+const C_FLOOR_ALB  = new Color3(0.03, 0.03, 0.06);
+const C_GRID_EMI   = new Color3(0.08, 0.18, 0.55);
+const C_EXIT_EMI   = new Color3(0.0,  0.9,  0.4);
+const C_START_EMI  = new Color3(0.9,  0.5,  0.05);
+const C_NODE_EMI   = new Color3(0.9,  0.85, 0.0);
+const C_ADAPT_EMI  = new Color3(0.3,  1.0,  0.55);
+
+export class MazeRenderer {
+  private scene:      Scene;
+  private glowLayer:  GlowLayer;
+  private pipeline!:  DefaultRenderingPipeline;
+
+  private wallMeshes:    Map<string, Mesh>                    = new Map();
+  private nodeMeshes:    Map<string, Mesh>                    = new Map();
+  private nodeLights:    Map<string, PointLight>              = new Map();
+  private nodeObservers: Map<string, Observer<Scene> | null>  = new Map();
+  private portalObserver: Observer<Scene> | null = null;
+  private exitPortal!:   TransformNode;
+
+  private sharedWallMat!: PBRMaterial;
+  private adaptedWallMat!: StandardMaterial;
+  private burstTex!:       DynamicTexture;
+
+  readonly CELL_SIZE:       number;
+  readonly WALL_HEIGHT:     number;
+  readonly WALL_THICKNESS:  number = 0.35;
+  private readonly offsetX: number;
+  private readonly offsetZ: number;
+
+  constructor(
+    scene: Scene,
+    glowLayer: GlowLayer,
+    private readonly cols: number,
+    private readonly rows: number,
+    cellSize   = 6,
+    wallHeight = 4,
+  ) {
+    this.scene      = scene;
+    this.glowLayer  = glowLayer;
+    this.CELL_SIZE  = cellSize;
+    this.WALL_HEIGHT = wallHeight;
+    this.offsetX    = -(cols * cellSize) / 2;
+    this.offsetZ    = -(rows * cellSize) / 2;
+    this.createMaterials();
+  }
+
+  // ─── Materials ───────────────────────────────────────────────────────────────
+
+  private createMaterials(): void {
+    this.sharedWallMat = new PBRMaterial('mazeWall', this.scene);
+    this.sharedWallMat.albedoColor   = C_WALL_ALB;
+    this.sharedWallMat.emissiveColor = C_WALL_EMI;
+    this.sharedWallMat.metallic      = 0.85;
+    this.sharedWallMat.roughness     = 0.15;
+
+    this.adaptedWallMat = new StandardMaterial('mazeAdaptWall', this.scene);
+    this.adaptedWallMat.emissiveColor = C_ADAPT_EMI;
+    this.adaptedWallMat.diffuseColor  = C_ADAPT_EMI.scale(0.3);
+    this.adaptedWallMat.alpha         = 0.5;
+
+    // Shared texture for node burst particles
+    this.burstTex = new DynamicTexture('burstTex', { width: 16, height: 16 }, this.scene, false);
+    const bctx = this.burstTex.getContext();
+    const bg = bctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+    bg.addColorStop(0,   'rgba(255,220,50,1)');
+    bg.addColorStop(0.4, 'rgba(255,140,0,0.6)');
+    bg.addColorStop(1,   'rgba(255,80,0,0)');
+    bctx.fillStyle = bg;
+    bctx.fillRect(0, 0, 16, 16);
+    this.burstTex.update();
+  }
+
+  // ─── Build ───────────────────────────────────────────────────────────────────
+
+  build(grid: MazeCell[][]): void {
+    this.setupLighting();
+    this.buildFloor();
+    this.buildBoundary();
+    this.buildInteriorWalls(grid);
+    this.buildExitPortal(grid);
+    this.buildStartMarker();
+    this.buildDataNodes(grid);
+    this.setupPostProcessing();
+  }
+
+  private setupLighting(): void {
+    const ambient = new HemisphericLight('mazeAmbient', new Vector3(0, 1, 0), this.scene);
+    ambient.intensity   = 0.18;
+    ambient.diffuse     = new Color3(0.4, 0.5, 0.8);
+    ambient.groundColor = new Color3(0.05, 0.05, 0.12);
+
+    const overhead = new DirectionalLight('mazeDir', new Vector3(0, -1, 0.2), this.scene);
+    overhead.intensity = 0.25;
+    overhead.diffuse   = new Color3(0.6, 0.7, 1.0);
+
+    const center = new PointLight('mazeCenter', new Vector3(0, 8, 0), this.scene);
+    center.intensity = 0.4;
+    center.range     = Math.max(this.cols, this.rows) * this.CELL_SIZE * 1.5;
+    center.diffuse   = new Color3(0.3, 0.5, 1.0);
+  }
+
+  private buildFloor(): void {
+    const w = this.cols * this.CELL_SIZE + 2;
+    const h = this.rows * this.CELL_SIZE + 2;
+
+    const floor = MeshBuilder.CreateGround('mazeFloor', { width: w, height: h }, this.scene);
+    floor.checkCollisions = true;
+    floor.receiveShadows  = true;
+
+    const mat = new PBRMaterial('mazeFloorMat', this.scene);
+    mat.albedoColor   = C_FLOOR_ALB;
+    mat.emissiveColor = new Color3(0.01, 0.04, 0.12);
+    mat.metallic      = 0.2;
+    mat.roughness     = 0.9;
+    floor.material    = mat;
+
+    // Grid lines
+    const spacing = this.CELL_SIZE;
+    const gridMat  = new StandardMaterial('mazeGridMat', this.scene);
+    gridMat.emissiveColor = C_GRID_EMI;
+    gridMat.alpha         = 0.55;
+
+    for (let i = 0; i <= this.cols; i++) {
+      const line = MeshBuilder.CreateBox(`gl_x${i}`, { width: 0.06, height: 0.02, depth: h }, this.scene);
+      line.position.set(this.offsetX + i * spacing, 0.01, 0);
+      line.material = gridMat;
+    }
+    for (let i = 0; i <= this.rows; i++) {
+      const line = MeshBuilder.CreateBox(`gl_z${i}`, { width: w, height: 0.02, depth: 0.06 }, this.scene);
+      line.position.set(0, 0.01, this.offsetZ + i * spacing);
+      line.material = gridMat;
+    }
+  }
+
+  private buildBoundary(): void {
+    const W = this.cols * this.CELL_SIZE;
+    const H = this.rows * this.CELL_SIZE;
+    const y = this.WALL_HEIGHT / 2;
+
+    const sides: Array<[string, number, number, number, number, number]> = [
+      ['bN', 0, y, this.offsetZ,   W + this.WALL_THICKNESS, this.WALL_THICKNESS],
+      ['bS', 0, y, -this.offsetZ,  W + this.WALL_THICKNESS, this.WALL_THICKNESS],
+      ['bW', this.offsetX,  y, 0,  this.WALL_THICKNESS, H + this.WALL_THICKNESS],
+      ['bE', -this.offsetX, y, 0,  this.WALL_THICKNESS, H + this.WALL_THICKNESS],
+    ];
+
+    for (const [name, x, yPos, z, bw, bh] of sides) {
+      const m = MeshBuilder.CreateBox(name, { width: bw, height: this.WALL_HEIGHT, depth: bh }, this.scene);
+      m.position.set(x, yPos, z);
+      m.material        = this.sharedWallMat;
+      m.checkCollisions = true;
+      this.glowLayer.addIncludedOnlyMesh(m);
+    }
+  }
+
+  private buildInteriorWalls(grid: MazeCell[][]): void {
+    const t  = this.WALL_THICKNESS;
+    const cs = this.CELL_SIZE;
+
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const cell = grid[r][c];
+
+        if (cell.walls.S && r < this.rows - 1) {
+          const id = `H_${c}_${r}`;
+          const x  = this.offsetX + c * cs + cs / 2;
+          const z  = this.offsetZ + (r + 1) * cs;
+          this.wallMeshes.set(id, this.createWallBox(id, x, z, cs + t, t));
+        }
+
+        if (cell.walls.E && c < this.cols - 1) {
+          const id = `V_${c}_${r}`;
+          const x  = this.offsetX + (c + 1) * cs;
+          const z  = this.offsetZ + r * cs + cs / 2;
+          this.wallMeshes.set(id, this.createWallBox(id, x, z, t, cs + t));
+        }
+      }
+    }
+  }
+
+  private createWallBox(id: string, x: number, z: number, bw: number, bd: number): Mesh {
+    const m = MeshBuilder.CreateBox(id, { width: bw, height: this.WALL_HEIGHT, depth: bd }, this.scene);
+    m.position.set(x, this.WALL_HEIGHT / 2, z);
+    m.material        = this.sharedWallMat;
+    m.checkCollisions = true;
+    this.glowLayer.addIncludedOnlyMesh(m);
+    return m;
+  }
+
+  // ─── Exit portal ──────────────────────────────────────────────────────────────
+
+  private buildExitPortal(grid: MazeCell[][]): void {
+    const exitCell = grid[this.rows - 1][this.cols - 1];
+    const { x, z }  = this.cellToWorld(exitCell.col, exitCell.row);
+
+    this.exitPortal = new TransformNode('exitPortal', this.scene);
+    this.exitPortal.position.set(x, 0, z);
+
+    const base = MeshBuilder.CreateDisc('exitBase', { radius: 1.8, tessellation: 48 }, this.scene);
+    base.rotation.x = Math.PI / 2;
+    base.position.y = 0.05;
+    base.parent     = this.exitPortal;
+    const baseMat   = new StandardMaterial('exitBaseMat', this.scene);
+    baseMat.emissiveColor = C_EXIT_EMI;
+    baseMat.alpha         = 0.7;
+    base.material         = baseMat;
+    this.glowLayer.addIncludedOnlyMesh(base);
+
+    const ring = MeshBuilder.CreateTorus('exitRing', { diameter: 3.8, thickness: 0.18, tessellation: 64 }, this.scene);
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 1.9;
+    ring.parent     = this.exitPortal;
+    const ringMat   = new StandardMaterial('exitRingMat', this.scene);
+    ringMat.emissiveColor = C_EXIT_EMI;
+    ring.material         = ringMat;
+    this.glowLayer.addIncludedOnlyMesh(ring);
+
+    const inner = MeshBuilder.CreateDisc('exitInner', { radius: 1.5, tessellation: 32 }, this.scene);
+    inner.rotation.x = Math.PI / 2;
+    inner.position.y = 1.9;
+    inner.parent     = this.exitPortal;
+    const innerMat   = new StandardMaterial('exitInnerMat', this.scene);
+    innerMat.emissiveColor = C_EXIT_EMI.scale(0.6);
+    innerMat.alpha         = 0.5;
+    inner.material         = innerMat;
+    this.glowLayer.addIncludedOnlyMesh(inner);
+
+    this.buildExitParticles(new Vector3(x, 0, z));
+
+    const pLight = new PointLight('exitLight', new Vector3(x, 2, z), this.scene);
+    pLight.diffuse   = C_EXIT_EMI;
+    pLight.intensity = 1.8;
+    pLight.range     = 10;
+
+    this.portalObserver = this.scene.onBeforeRenderObservable.add(() => {
+      const t = performance.now() / 1000;
+      ring.rotation.y  = t * 0.6;
+      inner.rotation.y = -t * 1.1;
+      ring.scaling.setAll(1 + Math.sin(t * 2.5) * 0.06);
+    });
+  }
+
+  private buildExitParticles(pos: Vector3): void {
+    const ps  = new ParticleSystem('exitPs', 120, this.scene);
+    const tex = new DynamicTexture('exitPsTex', { width: 32, height: 32 }, this.scene, false);
+    const ctx = tex.getContext();
+    const g   = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 32, 32);
+    tex.update();
+    ps.particleTexture = tex;
+
+    ps.emitter      = pos.clone();
+    ps.minEmitBox   = new Vector3(-1, 0, -1);
+    ps.maxEmitBox   = new Vector3(1, 0, 1);
+    ps.color1       = new Color4(0.0, 1.0, 0.5, 1.0);
+    ps.color2       = new Color4(0.2, 0.8, 1.0, 0.8);
+    ps.colorDead    = new Color4(0.0, 0.5, 0.3, 0.0);
+    ps.minSize      = 0.06; ps.maxSize      = 0.18;
+    ps.minLifeTime  = 1.2;  ps.maxLifeTime  = 2.5;
+    ps.emitRate     = 50;
+    ps.direction1   = new Vector3(-0.3, 2, -0.3);
+    ps.direction2   = new Vector3(0.3,  4,  0.3);
+    ps.minEmitPower = 0.5;  ps.maxEmitPower = 1.5;
+    ps.gravity      = new Vector3(0, -1, 0);
+    ps.start();
+  }
+
+  private buildStartMarker(): void {
+    const x = this.offsetX + this.CELL_SIZE / 2;
+    const z = this.offsetZ + this.CELL_SIZE / 2;
+
+    const marker = MeshBuilder.CreateDisc('startMarker', { radius: 1.4, tessellation: 32 }, this.scene);
+    marker.rotation.x = Math.PI / 2;
+    marker.position.set(x, 0.06, z);
+    const mat = new StandardMaterial('startMarkerMat', this.scene);
+    mat.emissiveColor = C_START_EMI;
+    mat.alpha         = 0.6;
+    marker.material   = mat;
+    this.glowLayer.addIncludedOnlyMesh(marker);
+
+    const arrow = MeshBuilder.CreateCylinder('startArrow',
+      { height: 0.4, diameterTop: 0, diameterBottom: 0.5, tessellation: 3 }, this.scene);
+    arrow.position.set(x, 0.2, z);
+    const aMat = new StandardMaterial('startArrowMat', this.scene);
+    aMat.emissiveColor = C_START_EMI;
+    arrow.material     = aMat;
+    this.glowLayer.addIncludedOnlyMesh(arrow);
+  }
+
+  private buildDataNodes(grid: MazeCell[][]): void {
+    let idx = 0;
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        if (!grid[r][c].dataNode) continue;
+
+        const { x, z } = this.cellToWorld(c, r);
+        const id  = `node_${c}_${r}`;
+
+        // Orb
+        const orb = MeshBuilder.CreateSphere(id, { diameter: 0.7, segments: 12 }, this.scene);
+        orb.position.set(x, 1.5, z);
+        const mat = new StandardMaterial(`${id}Mat`, this.scene);
+        mat.emissiveColor = C_NODE_EMI;
+        mat.diffuseColor  = C_NODE_EMI.scale(0.3);
+        orb.material      = mat;
+        this.glowLayer.addIncludedOnlyMesh(orb);
+
+        // Small point light that makes corridors glow yellow nearby
+        const light = new PointLight(`${id}Light`, new Vector3(x, 1.5, z), this.scene);
+        light.diffuse   = C_NODE_EMI;
+        light.intensity = 0.7;
+        light.range     = 4.5;
+        this.nodeLights.set(id, light);
+
+        // Hover animation — stored for cleanup
+        const off = idx * 0.7;
+        const obs = this.scene.onBeforeRenderObservable.add(() => {
+          orb.position.y  = 1.5 + Math.sin(performance.now() / 1000 * 1.8 + off) * 0.2;
+          orb.rotation.y += 0.025;
+        });
+        this.nodeObservers.set(id, obs);
+        this.nodeMeshes.set(id, orb);
+        idx++;
+      }
+    }
+  }
+
+  private setupPostProcessing(): void {
+    const cam = this.scene.activeCamera;
+    if (!cam) return;
+    this.pipeline = new DefaultRenderingPipeline('mazePipe', true, this.scene, [cam]);
+    this.pipeline.bloomEnabled    = true;
+    this.pipeline.bloomThreshold  = 0.2;   // only very bright emissives bloom
+    this.pipeline.bloomWeight     = 0.35;  // much less intense spread
+    this.pipeline.bloomKernel     = 48;    // tighter halo
+    this.pipeline.bloomScale      = 0.5;
+    this.pipeline.imageProcessingEnabled = true;
+    this.pipeline.imageProcessing.vignetteEnabled = true;
+    this.pipeline.imageProcessing.vignetteWeight  = 3;
+    this.pipeline.imageProcessing.contrast        = 1.05;
+    this.pipeline.imageProcessing.exposure        = 1.3;
+    this.pipeline.chromaticAberrationEnabled = true;
+    this.pipeline.chromaticAberration.aberrationAmount = 3;
+  }
+
+  // ─── Adaptive wall opening ────────────────────────────────────────────────────
+
+  animateWallOpen(wallId: string): Promise<void> {
+    const mesh = this.wallMeshes.get(wallId);
+    if (!mesh || !mesh.isEnabled()) return Promise.resolve();
+
+    mesh.material = this.adaptedWallMat;
+
+    return new Promise(resolve => {
+      const anim = new Animation('wallSink', 'position.y', 60,
+        Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CONSTANT);
+      const ease = new CubicEase();
+      ease.setEasingMode(EasingFunction.EASINGMODE_EASEIN);
+      anim.setEasingFunction(ease);
+      anim.setKeys([
+        { frame: 0,  value: this.WALL_HEIGHT / 2 },
+        { frame: 50, value: -(this.WALL_HEIGHT + 0.5) },
+      ]);
+      mesh.animations = [anim];
+      this.scene.beginAnimation(mesh, 0, 50, false, 1, () => {
+        mesh.setEnabled(false);
+        mesh.checkCollisions = false;
+        resolve();
+      });
+    });
+  }
+
+  // ─── Node collection + burst ──────────────────────────────────────────────────
+
+  collectNode(col: number, row: number): boolean {
+    const id   = `node_${col}_${row}`;
+    const mesh = this.nodeMeshes.get(id);
+    if (!mesh || !mesh.isEnabled()) return false;
+
+    // Stop animation observer
+    const obs = this.nodeObservers.get(id);
+    if (obs) {
+      this.scene.onBeforeRenderObservable.remove(obs);
+      this.nodeObservers.delete(id);
+    }
+
+    // Turn off point light
+    const light = this.nodeLights.get(id);
+    if (light) {
+      light.setEnabled(false);
+    }
+
+    mesh.setEnabled(false);
+    this.spawnNodeBurst(col, row);
+    return true;
+  }
+
+  spawnNodeBurst(col: number, row: number): void {
+    const { x, z } = this.cellToWorld(col, row);
+    const ps = new ParticleSystem(`burst_${col}_${row}`, 80, this.scene);
+    ps.particleTexture     = this.burstTex;
+    ps.emitter             = new Vector3(x, 1.5, z);
+    ps.minEmitBox          = new Vector3(-0.2, -0.2, -0.2);
+    ps.maxEmitBox          = new Vector3(0.2,   0.2,  0.2);
+    ps.color1              = new Color4(1.0, 0.9, 0.1, 1.0);
+    ps.color2              = new Color4(1.0, 0.4, 0.0, 0.8);
+    ps.colorDead           = new Color4(1.0, 0.2, 0.0, 0.0);
+    ps.minSize             = 0.08; ps.maxSize      = 0.25;
+    ps.minLifeTime         = 0.3;  ps.maxLifeTime  = 0.8;
+    ps.emitRate            = 300;
+    ps.direction1          = new Vector3(-2, 2, -2);
+    ps.direction2          = new Vector3(2,  5,  2);
+    ps.minEmitPower        = 1.0;  ps.maxEmitPower = 3.0;
+    ps.gravity             = new Vector3(0, -4, 0);
+    ps.targetStopDuration  = 0.15;
+    ps.disposeOnStop       = true;
+    ps.start();
+  }
+
+  // ─── Fog / atmosphere ─────────────────────────────────────────────────────────
+
+  setFogDensity(density: number): void {
+    this.scene.fogMode    = 3; // FOGMODE_EXP2
+    this.scene.fogDensity = density;
+    this.scene.fogColor   = new Color3(0.01, 0.02, 0.06);
+  }
+
+  // ─── Coordinate helpers ───────────────────────────────────────────────────────
+
+  cellToWorld(col: number, row: number): { x: number; z: number } {
+    return {
+      x: this.offsetX + col * this.CELL_SIZE + this.CELL_SIZE / 2,
+      z: this.offsetZ + row * this.CELL_SIZE + this.CELL_SIZE / 2,
+    };
+  }
+
+  worldToCell(wx: number, wz: number): { col: number; row: number } {
+    return {
+      col: Math.floor((wx - this.offsetX) / this.CELL_SIZE),
+      row: Math.floor((wz - this.offsetZ) / this.CELL_SIZE),
+    };
+  }
+
+  hasWallMesh(id: string): boolean {
+    const m = this.wallMeshes.get(id);
+    return !!m && m.isEnabled();
+  }
+
+  getExitWorldPos(): Vector3 {
+    return this.exitPortal.position.clone();
+  }
+
+  dispose(): void {
+    // Unregister all node observers
+    this.nodeObservers.forEach(obs => {
+      if (obs) this.scene.onBeforeRenderObservable.remove(obs);
+    });
+    this.nodeObservers.clear();
+
+    // Unregister portal observer
+    if (this.portalObserver) {
+      this.scene.onBeforeRenderObservable.remove(this.portalObserver);
+      this.portalObserver = null;
+    }
+
+    this.wallMeshes.forEach(m => m.dispose());
+    this.nodeMeshes.forEach(m => m.dispose());
+    this.nodeLights.forEach(l => l.dispose());
+    this.wallMeshes.clear();
+    this.nodeMeshes.clear();
+    this.nodeLights.clear();
+    this.burstTex?.dispose();
+    this.pipeline?.dispose();
+  }
+}

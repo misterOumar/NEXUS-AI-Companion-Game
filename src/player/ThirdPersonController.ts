@@ -20,6 +20,7 @@ export interface ThirdPersonConfig {
   cameraHeight: number;
   cameraMinDistance: number;
   cameraMaxDistance: number;
+  mouseSensitivity: number;
   enableCollisions: boolean;
   collisionRadius: number;
   collisionHeight: number;
@@ -53,6 +54,9 @@ export class ThirdPersonController {
   private readonly gravity: number = -20;
   private readonly jumpForce: number = 8;
 
+  // Pointer lock
+  private isPointerLocked: boolean = false;
+
   constructor(scene: Scene, config?: Partial<ThirdPersonConfig>) {
     this.scene = scene;
     this.inputManager = InputManager.getInstance();
@@ -65,6 +69,7 @@ export class ThirdPersonController {
       cameraHeight: 2,
       cameraMinDistance: 2,
       cameraMaxDistance: 15,
+      mouseSensitivity: 0.002,
       enableCollisions: true,
       collisionRadius: 0.35,
       collisionHeight: 1.8,
@@ -114,13 +119,13 @@ export class ThirdPersonController {
   }
 
   /**
-   * Crée la caméra orbitale
+   * Crée la caméra orbitale — sans attachControl, entièrement pilotée par la souris via pointer lock
    */
   private createCamera(): ArcRotateCamera {
     const camera = new ArcRotateCamera(
       'thirdPersonCamera',
-      Math.PI,
-      Math.PI / 3,
+      Math.PI,       // alpha : derrière le joueur (-Z)
+      Math.PI / 3,   // beta  : légèrement au-dessus
       this.config.cameraDistance,
       this.cameraTarget.position,
       this.scene
@@ -130,53 +135,78 @@ export class ThirdPersonController {
     camera.maxZ = 1000;
     camera.fov = 1.0;
 
-    // Limites de la caméra
+    // Limites
     camera.lowerRadiusLimit = this.config.cameraMinDistance;
     camera.upperRadiusLimit = this.config.cameraMaxDistance;
     camera.lowerBetaLimit = 0.3;
-    camera.upperBetaLimit = Math.PI / 2 - 0.1;
+    camera.upperBetaLimit = Math.PI / 2 - 0.05;
 
-    // Sensibilité
-    camera.angularSensibilityX = 500;
-    camera.angularSensibilityY = 500;
-    camera.wheelPrecision = 20;
+    // Inertie à zéro — on gère le lissage nous-mêmes
+    camera.inertia = 0;
 
-    // Lissage
-    camera.inertia = 0.7;
-
-    // Collision de la caméra (évite de passer à travers les murs)
+    // Collision caméra (évite de passer dans les murs)
     camera.checkCollisions = this.config.enableCollisions;
     camera.collisionRadius = new Vector3(0.5, 0.5, 0.5);
 
-    // Attache les contrôles au canvas
-    camera.attachControl(this.scene.getEngine().getRenderingCanvas(), true);
+    // PAS de attachControl — la rotation est gérée dans updateCameraRotation()
 
     return camera;
+  }
+
+  /**
+   * Active le pointer lock sur le canvas pour une caméra FPS-style
+   */
+  public enablePointerLock(canvas: HTMLCanvasElement): void {
+    canvas.addEventListener('click', () => {
+      if (!document.pointerLockElement) {
+        canvas.requestPointerLock();
+      }
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+      this.isPointerLocked = document.pointerLockElement === canvas;
+      // Clear any accumulated delta so the camera doesn't jump on lock acquire
+      if (this.isPointerLocked) this.inputManager.update();
+    });
+  }
+
+  /**
+   * Applique la rotation de la caméra depuis le delta souris (pointer lock ou clic droit)
+   */
+  private updateCameraRotation(): void {
+    const delta = this.inputManager.getMouseDelta();
+    const canRotate = this.isPointerLocked || this.inputManager.isMouseButtonDown(2);
+
+    if (canRotate && (delta.x !== 0 || delta.y !== 0)) {
+      this.camera.alpha -= delta.x * this.config.mouseSensitivity;
+      this.camera.beta = Math.max(
+        0.3,
+        Math.min(Math.PI / 2 - 0.05, this.camera.beta - delta.y * this.config.mouseSensitivity)
+      );
+    }
+
+    // Zoom molette
+    const wheel = this.inputManager.getWheelDelta();
+    if (wheel !== 0) {
+      this.camera.radius = Math.max(
+        this.config.cameraMinDistance,
+        Math.min(this.config.cameraMaxDistance, this.camera.radius + wheel * 0.005)
+      );
+    }
   }
 
   /**
    * Met à jour le contrôleur
    */
   public update(deltaTime: number): void {
-    // Vérifie si on court
     this.isRunning = this.inputManager.isKeyDown('shift');
 
-    // Mouvement avec collisions
     this.handleMovement(deltaTime);
-
-    // Saut
     this.handleJump();
-
-    // Gravité
     this.applyGravity(deltaTime);
-
-    // Synchronise le personnage visuel avec le collider
     this.syncCharacterToCollider();
-
-    // Met à jour la position de la cible caméra
     this.updateCameraTarget();
-
-    // Met à jour les animations du personnage
+    this.updateCameraRotation();
     this.character.update(deltaTime, this.isMoving, this.isRunning);
   }
 
@@ -191,8 +221,11 @@ export class ThirdPersonController {
 
     if (!this.isMoving) return;
 
-    // Direction basée sur l'orientation de la caméra
-    const cameraDirection = this.camera.alpha + Math.PI / 2;
+    // Direction basée sur l'orientation de la caméra.
+    // Pour ArcRotateCamera Babylon.js : pos = target + r*(sin(beta)*sin(alpha), cos(beta), sin(beta)*cos(alpha))
+    // Donc forward (camera→target, plan XZ) = (-sin(alpha), 0, -cos(alpha)).
+    // Dans la convention (sin(θ), 0, cos(θ)) de moveVector, l'angle de cette direction = alpha + PI.
+    const cameraDirection = this.camera.alpha + Math.PI;
 
     // Calcule la direction de mouvement
     const moveAngle = Math.atan2(right, forward);
@@ -276,15 +309,14 @@ export class ThirdPersonController {
   }
 
   /**
-   * Met à jour la position de la cible caméra
+   * Met à jour la position de la cible caméra — directement sur le collider sans inertie
    */
   private updateCameraTarget(): void {
-    const characterPos = this.collisionMesh.position;
-    this.cameraTarget.position.x = characterPos.x;
-    this.cameraTarget.position.y = characterPos.y + 1.2;
-    this.cameraTarget.position.z = characterPos.z;
-
-    this.camera.target = this.cameraTarget.position;
+    const p = this.collisionMesh.position;
+    this.cameraTarget.position.x = p.x;
+    this.cameraTarget.position.y = p.y + 1.2;
+    this.cameraTarget.position.z = p.z;
+    this.camera.target.copyFrom(this.cameraTarget.position);
   }
 
   /**

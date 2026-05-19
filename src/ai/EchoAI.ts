@@ -277,8 +277,12 @@ export class EchoAI {
   /**
    * Ajoute un callback pour les messages
    */
-  public onMessage(callback: EchoMessageCallback): void {
+  public onMessage(callback: EchoMessageCallback): () => void {
     this.messageCallbacks.push(callback);
+    return () => {
+      const idx = this.messageCallbacks.indexOf(callback);
+      if (idx >= 0) this.messageCallbacks.splice(idx, 1);
+    };
   }
 
   /**

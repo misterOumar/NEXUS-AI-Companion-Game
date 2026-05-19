@@ -76,13 +76,13 @@ export class InputManager {
     scene.onPointerObservable.add((pointerInfo) => {
       const event = pointerInfo.event as PointerEvent;
 
-      // Position souris
-      this.state.mousePosition.x = event.clientX;
-      this.state.mousePosition.y = event.clientY;
-
-      // Delta souris
-      this.state.mouseDelta.x = event.movementX || 0;
-      this.state.mouseDelta.y = event.movementY || 0;
+      // Position + delta souris (accumulé sur la frame, réinitialisé dans update())
+      if (pointerInfo.type === PointerEventTypes.POINTERMOVE) {
+        this.state.mousePosition.x = event.clientX;
+        this.state.mousePosition.y = event.clientY;
+        this.state.mouseDelta.x += event.movementX || 0;
+        this.state.mouseDelta.y += event.movementY || 0;
+      }
 
       // Boutons souris
       if (pointerInfo.type === PointerEventTypes.POINTERDOWN) {

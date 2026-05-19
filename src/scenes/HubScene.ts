@@ -123,8 +123,14 @@ export class HubScene extends AbstractScene {
       runSpeed: 10,
       cameraDistance: 6,
       cameraHeight: 2.5,
+      mouseSensitivity: 0.0022,
     });
     this.playerController.setPosition(new Vector3(0, 0, 8));
+
+    // Active le pointer lock (clic sur le canvas pour capturer la souris)
+    const canvas = this.scene.getEngine().getRenderingCanvas() as HTMLCanvasElement;
+    this.playerController.enablePointerLock(canvas);
+    this.showPointerLockHint();
 
     this.updateLoadingProgress(80, 'Initialisation d\'ECHO...');
 
@@ -459,6 +465,30 @@ export class HubScene extends AbstractScene {
         );
       }, 8000);
     }, 2000);
+  }
+
+  /**
+   * Affiche un hint "Clic pour jouer" jusqu'au premier pointer lock
+   */
+  private showPointerLockHint(): void {
+    const hint = document.createElement('div');
+    hint.id = 'pointer-lock-hint';
+    hint.textContent = '🖱 Clic pour jouer — Échap pour libérer la souris';
+    hint.style.cssText = [
+      'position:fixed', 'bottom:24px', 'left:50%', 'transform:translateX(-50%)',
+      'background:rgba(0,0,0,0.65)', 'color:#a0c8ff', 'padding:10px 22px',
+      'border-radius:8px', 'font-family:monospace', 'font-size:13px',
+      'pointer-events:none', 'z-index:9999', 'border:1px solid rgba(80,140,255,0.4)',
+      'transition:opacity 0.4s',
+    ].join(';');
+    document.body.appendChild(hint);
+
+    document.addEventListener('pointerlockchange', () => {
+      if (document.pointerLockElement) {
+        hint.style.opacity = '0';
+        setTimeout(() => hint.remove(), 400);
+      }
+    }, { once: true });
   }
 
   /**

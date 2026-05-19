@@ -8,8 +8,10 @@
 
 import { Engine } from '@/core/Engine';
 import { SceneManager } from '@/core/SceneManager';
+import { InputManager } from '@/core/InputManager';
 import { HubScene } from '@/scenes/HubScene';
 import { MirrorDuelScene } from '@/scenes/MirrorDuelScene';
+import { NeuroMazeScene } from '@/scenes/NeuroMazeScene';
 
 // Import des loaders Babylon.js
 import '@babylonjs/loaders/glTF';
@@ -39,7 +41,7 @@ async function initGame(): Promise<void> {
     // Enregistre les scènes
     sceneManager.registerScene('HubScene', HubScene);
     sceneManager.registerScene('MirrorDuelScene', MirrorDuelScene);
-    // sceneManager.registerScene('NeuroMazeScene', NeuroMazeScene);
+    sceneManager.registerScene('NeuroMazeScene', NeuroMazeScene);
     // sceneManager.registerScene('MindRushScene', MindRushScene);
 
     console.log('✅ Scènes enregistrées');
@@ -52,6 +54,9 @@ async function initGame(): Promise<void> {
     // Connecte la boucle de mise à jour
     engine.onUpdate((deltaTime) => {
       sceneManager.update(deltaTime);
+      // Reset mouse/keyboard deltas after ALL systems have read them this frame.
+      // Without this, mouseDelta accumulates indefinitely causing camera spin.
+      InputManager.getInstance().update();
     });
 
     // Démarre la boucle de rendu
