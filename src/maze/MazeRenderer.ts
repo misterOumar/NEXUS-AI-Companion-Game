@@ -3,14 +3,12 @@ import {
   Color3, Color4, Vector3, GlowLayer, Animation, CubicEase,
   EasingFunction, HemisphericLight, DirectionalLight, PointLight,
   ParticleSystem, DynamicTexture, TransformNode, DefaultRenderingPipeline,
-  Observer,
+  Observer, Texture,
 } from '@babylonjs/core';
 import type { MazeCell } from './MazeGenerator';
 
 // ─── Palette néon ──────────────────────────────────────────────────────────────
-const C_WALL_EMI   = new Color3(0.05, 0.35, 0.90);
-const C_WALL_ALB   = new Color3(0.04, 0.04, 0.10);
-const C_FLOOR_ALB  = new Color3(0.03, 0.03, 0.06);
+const C_WALL_EMI   = new Color3(0.01, 0.06, 0.18);
 const C_GRID_EMI   = new Color3(0.08, 0.18, 0.55);
 const C_EXIT_EMI   = new Color3(0.0,  0.9,  0.4);
 const C_START_EMI  = new Color3(0.9,  0.5,  0.05);
@@ -60,10 +58,29 @@ export class MazeRenderer {
 
   private createMaterials(): void {
     this.sharedWallMat = new PBRMaterial('mazeWall', this.scene);
-    this.sharedWallMat.albedoColor   = C_WALL_ALB;
+
+    // PBR textures (MetalPlates017B 1K)
+    const T = '/textures/walls/MetalPlates017B_1K-PNG_';
+    const uS = 3, vS = 2; // 2 unités par plaque
+
+    const colorTex = new Texture(`${T}Color.png`, this.scene);
+    colorTex.uScale = uS; colorTex.vScale = vS;
+    this.sharedWallMat.albedoTexture = colorTex;
+
+    const normalTex = new Texture(`${T}NormalGL.png`, this.scene);
+    normalTex.uScale = uS; normalTex.vScale = vS;
+    this.sharedWallMat.bumpTexture = normalTex;
+
+    const aoTex = new Texture(`${T}AmbientOcclusion.png`, this.scene);
+    aoTex.uScale = uS; aoTex.vScale = vS;
+    this.sharedWallMat.ambientTexture = aoTex;
+    this.sharedWallMat.ambientColor   = new Color3(1, 1, 1);
+
+    // Teinture bleu acier — l'emissive + GlowLayer ajoute le filet néon
+    this.sharedWallMat.albedoColor   = new Color3(0.82, 0.88, 1.0);
     this.sharedWallMat.emissiveColor = C_WALL_EMI;
-    this.sharedWallMat.metallic      = 0.85;
-    this.sharedWallMat.roughness     = 0.15;
+    this.sharedWallMat.metallic      = 0.55;
+    this.sharedWallMat.roughness     = 0.45;
 
     this.adaptedWallMat = new StandardMaterial('mazeAdaptWall', this.scene);
     this.adaptedWallMat.emissiveColor = C_ADAPT_EMI;
@@ -97,18 +114,18 @@ export class MazeRenderer {
 
   private setupLighting(): void {
     const ambient = new HemisphericLight('mazeAmbient', new Vector3(0, 1, 0), this.scene);
-    ambient.intensity   = 0.18;
-    ambient.diffuse     = new Color3(0.4, 0.5, 0.8);
-    ambient.groundColor = new Color3(0.05, 0.05, 0.12);
+    ambient.intensity   = 0.55;
+    ambient.diffuse     = new Color3(0.7, 0.75, 1.0);
+    ambient.groundColor = new Color3(0.1,  0.1,  0.2);
 
     const overhead = new DirectionalLight('mazeDir', new Vector3(0, -1, 0.2), this.scene);
-    overhead.intensity = 0.25;
-    overhead.diffuse   = new Color3(0.6, 0.7, 1.0);
+    overhead.intensity = 0.6;
+    overhead.diffuse   = new Color3(0.8, 0.85, 1.0);
 
     const center = new PointLight('mazeCenter', new Vector3(0, 8, 0), this.scene);
-    center.intensity = 0.4;
+    center.intensity = 0.6;
     center.range     = Math.max(this.cols, this.rows) * this.CELL_SIZE * 1.5;
-    center.diffuse   = new Color3(0.3, 0.5, 1.0);
+    center.diffuse   = new Color3(0.5, 0.65, 1.0);
   }
 
   private buildFloor(): void {
@@ -120,10 +137,25 @@ export class MazeRenderer {
     floor.receiveShadows  = true;
 
     const mat = new PBRMaterial('mazeFloorMat', this.scene);
-    mat.albedoColor   = C_FLOOR_ALB;
-    mat.emissiveColor = new Color3(0.01, 0.04, 0.12);
-    mat.metallic      = 0.2;
-    mat.roughness     = 0.9;
+
+    // PBR textures sol (Tiles076 1K) — ~1.7 unités par carreau
+    const fT = '/textures/floor/tiles/Tiles076_1K-PNG_';
+    const fS = Math.round((this.cols * this.CELL_SIZE) / 1.7);
+
+    const floorColor = new Texture(`${fT}Color.png`, this.scene);
+    floorColor.uScale = fS; floorColor.vScale = fS;
+    mat.albedoTexture = floorColor;
+
+    const floorNormal = new Texture(`${fT}NormalGL.png`, this.scene);
+    floorNormal.uScale = fS; floorNormal.vScale = fS;
+    mat.bumpTexture = floorNormal;
+
+    // Légère teinte bleu-nuit + emissive circuit pour l'esthétique numérique
+    mat.albedoColor   = new Color3(0.70, 0.78, 1.0);
+    mat.emissiveColor = new Color3(0.01, 0.04, 0.14);
+    mat.ambientColor  = new Color3(1, 1, 1);
+    mat.metallic      = 0.15;
+    mat.roughness     = 0.75;
     floor.material    = mat;
 
     // Grid lines
