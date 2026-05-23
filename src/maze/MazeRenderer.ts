@@ -27,9 +27,13 @@ export class MazeRenderer {
   private portalObserver: Observer<Scene> | null = null;
   private exitPortal!:   TransformNode;
 
-  private sharedWallMat!: PBRMaterial;
+  private sharedWallMat!:  PBRMaterial;
   private adaptedWallMat!: StandardMaterial;
+  private wallStripMat!:   StandardMaterial;
   private burstTex!:       DynamicTexture;
+  private exitPs:          ParticleSystem | null = null;
+  private exitPsTex:       DynamicTexture | null = null;
+  private stripMeshes:     Mesh[] = [];
 
   readonly CELL_SIZE:       number;
   readonly WALL_HEIGHT:     number;
@@ -86,6 +90,11 @@ export class MazeRenderer {
     this.adaptedWallMat.emissiveColor = C_ADAPT_EMI;
     this.adaptedWallMat.diffuseColor  = C_ADAPT_EMI.scale(0.3);
     this.adaptedWallMat.alpha         = 0.5;
+
+    // Arêtes néon en haut de chaque mur — pas dans le GlowLayer (surcharge la passe glow)
+    this.wallStripMat = new StandardMaterial('wallStripMat', this.scene);
+    this.wallStripMat.emissiveColor = new Color3(0.08, 0.45, 1.0);
+    this.wallStripMat.diffuseColor  = new Color3(0, 0, 0);
 
     // Shared texture for node burst particles
     this.burstTex = new DynamicTexture('burstTex', { width: 16, height: 16 }, this.scene, false);
@@ -228,6 +237,15 @@ export class MazeRenderer {
     m.material        = this.sharedWallMat;
     m.checkCollisions = true;
     this.glowLayer.addIncludedOnlyMesh(m);
+
+    // Arête néon au sommet du mur
+    const strip = MeshBuilder.CreateBox(`${id}_strip`, { width: bw, height: 0.05, depth: bd }, this.scene);
+    strip.position.set(x, this.WALL_HEIGHT + 0.025, z);
+    strip.material    = this.wallStripMat;
+    strip.isPickable  = false;
+    this.glowLayer.addIncludedOnlyMesh(strip);
+    this.stripMeshes.push(strip);
+
     return m;
   }
 
@@ -285,8 +303,10 @@ export class MazeRenderer {
   }
 
   private buildExitParticles(pos: Vector3): void {
-    const ps  = new ParticleSystem('exitPs', 120, this.scene);
-    const tex = new DynamicTexture('exitPsTex', { width: 32, height: 32 }, this.scene, false);
+    this.exitPs  = new ParticleSystem('exitPs', 120, this.scene);
+    this.exitPsTex = new DynamicTexture('exitPsTex', { width: 32, height: 32 }, this.scene, false);
+    const ps  = this.exitPs;
+    const tex = this.exitPsTex;
     const ctx = tex.getContext();
     const g   = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
     g.addColorStop(0, 'rgba(255,255,255,1)');
@@ -375,19 +395,26 @@ export class MazeRenderer {
   private setupPostProcessing(): void {
     const cam = this.scene.activeCamera;
     if (!cam) return;
+
+    // Firefox gère la tonemapping HDR et le stencil différemment de Chrome/Safari.
+    // On réduit l'exposition et le bloom pour éviter que les matériaux PBR disparaissent.
+    const ff = /Firefox/i.test(navigator.userAgent);
+
     this.pipeline = new DefaultRenderingPipeline('mazePipe', true, this.scene, [cam]);
     this.pipeline.bloomEnabled    = true;
-    this.pipeline.bloomThreshold  = 0.2;   // only very bright emissives bloom
-    this.pipeline.bloomWeight     = 0.35;  // much less intense spread
-    this.pipeline.bloomKernel     = 48;    // tighter halo
+    this.pipeline.bloomThreshold  = ff ? 0.45 : 0.2;
+    this.pipeline.bloomWeight     = ff ? 0.2  : 0.35;
+    this.pipeline.bloomKernel     = 48;
     this.pipeline.bloomScale      = 0.5;
     this.pipeline.imageProcessingEnabled = true;
     this.pipeline.imageProcessing.vignetteEnabled = true;
-    this.pipeline.imageProcessing.vignetteWeight  = 3;
-    this.pipeline.imageProcessing.contrast        = 1.05;
-    this.pipeline.imageProcessing.exposure        = 1.3;
-    this.pipeline.chromaticAberrationEnabled = true;
-    this.pipeline.chromaticAberration.aberrationAmount = 3;
+    this.pipeline.imageProcessing.vignetteWeight  = ff ? 1.8 : 3.0;
+    this.pipeline.imageProcessing.contrast        = ff ? 1.0 : 1.05;
+    this.pipeline.imageProcessing.exposure        = ff ? 1.0 : 1.3;
+    this.pipeline.chromaticAberrationEnabled      = !ff;
+    if (!ff) {
+      this.pipeline.chromaticAberration.aberrationAmount = 3;
+    }
   }
 
   // ─── Adaptive wall opening ────────────────────────────────────────────────────
@@ -517,6 +544,10 @@ export class MazeRenderer {
     this.nodeMeshes.clear();
     this.nodeLights.clear();
     this.burstTex?.dispose();
+    this.exitPs?.dispose();
+    this.exitPsTex?.dispose();
+    this.stripMeshes.forEach(m => m.dispose());
+    this.stripMeshes = [];
     this.pipeline?.dispose();
   }
 }

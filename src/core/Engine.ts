@@ -29,7 +29,7 @@ export class Engine {
     this.babylonEngine = new BabylonEngine(
       canvas,
       config.antialias ?? true,
-      undefined,
+      { stencil: true, preserveDrawingBuffer: false },
       config.adaptToDeviceRatio ?? true
     );
 

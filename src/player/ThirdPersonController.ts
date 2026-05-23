@@ -5,6 +5,7 @@ import {
   Mesh,
   MeshBuilder,
   TransformNode,
+  Ray,
 } from '@babylonjs/core';
 import { InputManager } from '@/core/InputManager';
 import { PlayerCharacter } from './PlayerCharacter';
@@ -54,8 +55,19 @@ export class ThirdPersonController {
   private readonly gravity: number = -20;
   private readonly jumpForce: number = 8;
 
+  // Head bob
+  private bobPhase:  number = 0;
+  private bobOffset: number = 0;
+
   // Pointer lock
   private isPointerLocked: boolean = false;
+
+  // Spring arm : rayon souhaité (défini par scroll) vs rayon réel (contrainte par murs)
+  private desiredRadius: number = 5;
+
+  // Limites de déplacement (hard clamp anti-sortie de labyrinthe)
+  private boundsMin: Vector3 | null = null;
+  private boundsMax: Vector3 | null = null;
 
   constructor(scene: Scene, config?: Partial<ThirdPersonConfig>) {
     this.scene = scene;
@@ -92,6 +104,9 @@ export class ThirdPersonController {
 
     // Crée la caméra
     this.camera = this.createCamera();
+
+    // Sync du rayon souhaité avec la config
+    this.desiredRadius = this.config.cameraDistance;
   }
 
   /**
@@ -144,9 +159,10 @@ export class ThirdPersonController {
     // Inertie à zéro — on gère le lissage nous-mêmes
     camera.inertia = 0;
 
-    // Collision caméra (évite de passer dans les murs)
-    camera.checkCollisions = this.config.enableCollisions;
-    camera.collisionRadius = new Vector3(0.5, 0.5, 0.5);
+    // Collision native désactivée — le spring arm (updateCameraSpringArm) gère
+    // la distance caméra en castant un rayon, ce qui évite les "bounces" brusques
+    // causés par le moteur de collision interne dans les couloirs étroits.
+    camera.checkCollisions = false;
 
     // PAS de attachControl — la rotation est gérée dans updateCameraRotation()
 
@@ -185,12 +201,12 @@ export class ThirdPersonController {
       );
     }
 
-    // Zoom molette
+    // Zoom molette — met à jour le rayon souhaité, le spring arm applique la contrainte
     const wheel = this.inputManager.getWheelDelta();
     if (wheel !== 0) {
-      this.camera.radius = Math.max(
+      this.desiredRadius = Math.max(
         this.config.cameraMinDistance,
-        Math.min(this.config.cameraMaxDistance, this.camera.radius + wheel * 0.005)
+        Math.min(this.config.cameraMaxDistance, this.desiredRadius + wheel * 0.005)
       );
     }
   }
@@ -199,15 +215,35 @@ export class ThirdPersonController {
    * Met à jour le contrôleur
    */
   public update(deltaTime: number): void {
+    // Cap à ~30 FPS minimum : évite le tunneling à travers les murs fins (0.35 u)
+    // à vitesse max 9 u/s : 9 × 0.033 = 0.297 u/frame < 0.35 = épaisseur mur
+    const dt = Math.min(deltaTime, 0.033);
+
     this.isRunning = this.inputManager.isKeyDown('shift');
 
-    this.handleMovement(deltaTime);
+    this.handleMovement(dt);
     this.handleJump();
-    this.applyGravity(deltaTime);
+    this.applyGravity(dt);
     this.syncCharacterToCollider();
+    this.updateHeadBob(dt);
     this.updateCameraTarget();
     this.updateCameraRotation();
-    this.character.update(deltaTime, this.isMoving, this.isRunning);
+    this.updateCameraSpringArm();
+    this.character.update(dt, this.isMoving, this.isRunning);
+  }
+
+  private updateHeadBob(deltaTime: number): void {
+    if (this.isMoving && this.isGrounded) {
+      const speed = this.isRunning ? 13 : 8;
+      const amp   = this.isRunning ? 0.06 : 0.035;
+      this.bobPhase  += deltaTime * speed;
+      this.bobOffset  = Math.sin(this.bobPhase) * amp;
+    } else {
+      this.bobOffset *= 0.85; // retour progressif à zéro
+    }
+    // FOV légèrement plus large à la course — sensation de vitesse
+    const targetFov = this.isRunning && this.isMoving ? 1.15 : 1.0;
+    this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, deltaTime * 6);
   }
 
   /**
@@ -256,6 +292,13 @@ export class ThirdPersonController {
       this.collisionMesh.moveWithCollisions(moveVector);
     } else {
       this.collisionMesh.position.addInPlace(moveVector);
+    }
+
+    // Clamp dur pour empêcher de sortir des limites du labyrinthe
+    if (this.boundsMin && this.boundsMax) {
+      const p = this.collisionMesh.position;
+      p.x = Math.max(this.boundsMin.x, Math.min(this.boundsMax.x, p.x));
+      p.z = Math.max(this.boundsMin.z, Math.min(this.boundsMax.z, p.z));
     }
   }
 
@@ -314,9 +357,53 @@ export class ThirdPersonController {
   private updateCameraTarget(): void {
     const p = this.collisionMesh.position;
     this.cameraTarget.position.x = p.x;
-    this.cameraTarget.position.y = p.y + 1.2;
+    this.cameraTarget.position.y = p.y + 1.2 + this.bobOffset;
     this.cameraTarget.position.z = p.z;
     this.camera.target.copyFrom(this.cameraTarget.position);
+  }
+
+  /**
+   * Spring arm : ajuste camera.radius pour qu'un mur entre la cible et la caméra
+   * ne puisse jamais être traversé. Rapprochement immédiat, éloignement lissé.
+   */
+  private updateCameraSpringArm(): void {
+    const alpha = this.camera.alpha;
+    const beta  = this.camera.beta;
+
+    // Direction unitaire de la cible vers la position idéale de la caméra
+    // (formule ArcRotateCamera Babylon.js : pos = target + r*(sinβ·sinα, cosβ, sinβ·cosα))
+    const dir = new Vector3(
+      Math.sin(beta) * Math.sin(alpha),
+      Math.cos(beta),
+      Math.sin(beta) * Math.cos(alpha)
+    );
+
+    const ray = new Ray(this.cameraTarget.position.clone(), dir, this.desiredRadius + 0.3);
+
+    const hit = this.scene.pickWithRay(
+      ray,
+      (mesh) => mesh.checkCollisions && mesh !== this.collisionMesh,
+      false
+    );
+
+    const wallDist   = hit?.hit && hit.distance !== undefined ? hit.distance : Infinity;
+    const safeRadius = Math.min(this.desiredRadius, wallDist - 0.25);
+    const clamped    = Math.max(this.config.cameraMinDistance, safeRadius);
+
+    // Pull-in immédiat quand un mur bloque, restauration lissée quand dégagé
+    if (clamped < this.camera.radius) {
+      this.camera.radius = clamped;
+    } else {
+      this.camera.radius += (clamped - this.camera.radius) * 0.12;
+    }
+  }
+
+  /**
+   * Définit les limites de déplacement du joueur (clamp dur anti-sortie de zone)
+   */
+  public setMovementBounds(min: Vector3, max: Vector3): void {
+    this.boundsMin = min;
+    this.boundsMax = max;
   }
 
   /**

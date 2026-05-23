@@ -116,8 +116,14 @@ export class NeuroMazeScene extends AbstractScene {
   }
 
   public async createScene(): Promise<void> {
-    const glow = new GlowLayer('mazeGlow', this.scene);
-    glow.intensity = 0.8;
+    // Firefox a des problèmes de compositing HDR avec GlowLayer.
+    // ldrMerge force le blend en espace LDR, plus cohérent cross-browser.
+    const ff = /Firefox/i.test(navigator.userAgent);
+    const glow = new GlowLayer('mazeGlow', this.scene, {
+      blurKernelSize: ff ? 16 : 32,
+      ldrMerge: true,
+    });
+    glow.intensity = ff ? 0.6 : 0.8;
 
     // Generate maze data
     this.generator = new MazeGenerator(MAZE_COLS, MAZE_ROWS);
@@ -135,24 +141,30 @@ export class NeuroMazeScene extends AbstractScene {
 
     // Create controller FIRST so scene.activeCamera exists for post-processing
     this.controller = new ThirdPersonController(this.scene, {
-      moveSpeed:        4.5,
-      runSpeed:         9,
-      cameraDistance:   5,
-      cameraHeight:     2,
-      mouseSensitivity: 0.0022,
+      moveSpeed:          4.5,
+      runSpeed:           9,
+      cameraDistance:     4.5,   // spring arm gère la distance réelle, pas besoin de régler après
+      cameraMinDistance:  1.2,   // zoom-in minimal si caméra collée au mur
+      cameraHeight:       2,
+      mouseSensitivity:   0.0022,
+      collisionRadius:    0.3,   // légèrement réduit pour éviter de se coincer aux angles
     });
     this.controller.setPosition(new Vector3(startPos.x, 0, startPos.z));
 
     const canvas = this.scene.getEngine().getRenderingCanvas() as HTMLCanvasElement;
     this.controller.enablePointerLock(canvas);
 
-    // Camera: disable wall collision (corridors are 6 units wide, camera radius 5
-    // constantly hits walls and causes the apparent "bounce"). Also use a slightly
-    // more overhead angle so the player is visible ahead in narrow corridors.
+    // Angle overhead plus prononcé → personnage visible en couloir étroit
     const cam = this.controller.getCamera();
-    cam.checkCollisions = false;
-    cam.beta   = Math.PI / 2.6;  // ~69° from top (more overhead than default 60°)
-    cam.radius = 4.5;
+    cam.beta = Math.PI / 2.6;  // ~69° depuis le sommet
+
+    // Limites de déplacement calées sur les bords du labyrinthe (murs de bordure inclus)
+    const halfW = (MAZE_COLS * CELL_SIZE) / 2 - 0.5;
+    const halfH = (MAZE_ROWS * CELL_SIZE) / 2 - 0.5;
+    this.controller.setMovementBounds(
+      new Vector3(-halfW, 0, -halfH),
+      new Vector3( halfW, 8,  halfH)
+    );
 
     // Player light: illuminates the character from above so it's always visible
     // against the dark emissive maze walls even with post-processing active.
