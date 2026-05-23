@@ -4,7 +4,9 @@ import { ThirdPersonController } from '@/player/ThirdPersonController';
 import { MazeGenerator, type MazeCell } from '@/maze/MazeGenerator';
 import type { Dir } from '@/maze/MazeGenerator';
 import { MazeRenderer } from '@/maze/MazeRenderer';
+import { MazeDrone, DRONE_ACTIVATION_DELAY } from '@/maze/MazeDrone';
 import { EchoAI, AdviceType } from '@/ai/EchoAI';
+import { AudioManager } from '@/core/AudioManager';
 import { SceneManager } from '@/core/SceneManager';
 
 // ─── Phase ────────────────────────────────────────────────────────────────────
@@ -46,12 +48,13 @@ function pick<T>(arr: T[]): T {
 }
 
 // ─── Score ────────────────────────────────────────────────────────────────────
-function computeScore(elapsed: number, nodesCollected: number, adaptCount: number, nodesTotal: number): { score: number; rank: string } {
+function computeScore(elapsed: number, nodesCollected: number, adaptCount: number, nodesTotal: number, captureCount: number): { score: number; rank: string } {
   const timePenalty = Math.floor(elapsed) * 10;
   const nodeBon     = nodesCollected * 300;
   const perfectBon  = nodesCollected === nodesTotal ? 2000 : 0;
   const adaptPen    = adaptCount * 400;
-  const score       = Math.max(100, 10000 + nodeBon + perfectBon - timePenalty - adaptPen);
+  const capturePen  = captureCount * 1200;
+  const score       = Math.max(100, 10000 + nodeBon + perfectBon - timePenalty - adaptPen - capturePen);
   let rank = 'C';
   if (score >= 13000) rank = 'S';
   else if (score >= 10000) rank = 'A';
@@ -93,12 +96,22 @@ export class NeuroMazeScene extends AbstractScene {
   private elTimer!:       HTMLSpanElement;
   private elNodes!:       HTMLSpanElement;
   private elAdapt!:       HTMLSpanElement;
+  private elLives!:       HTMLSpanElement;
   private elEchoMsg!:     HTMLDivElement;
   private echoMsgTimer:   ReturnType<typeof setTimeout> | null = null;
   private lastDisplayedSecs: number = -1;
 
   // Player light (ensures character stays visible in dark corridors)
   private playerLight!:   PointLight;
+
+  // Drone IA
+  private drone:          MazeDrone | null = null;
+  private captureCount:   number = 0;
+  private frozenUntil:    number = 0;
+  private droneWarningEl: HTMLDivElement | null = null;
+
+  // Audio
+  private stepTimer:      number = 0;
 
   // Overlays
   private introOverlay!:  HTMLDivElement;
@@ -180,6 +193,15 @@ export class NeuroMazeScene extends AbstractScene {
     this.exitWorldPos      = this.renderer.getExitWorldPos();
     this.lastProgressDist  = MAZE_COLS + MAZE_ROWS; // max Manhattan distance
 
+    // Drone IA — spawn dans le coin opposé
+    this.drone = new MazeDrone(
+      this.scene, glow, this.renderer, this.generator, MAZE_COLS, MAZE_ROWS,
+    );
+
+    // Ajouter le mesh du drone comme shadow caster
+    const shadowGen = this.renderer.getShadowGenerator();
+    if (shadowGen) shadowGen.addShadowCaster(this.drone.getMesh());
+
     // ECHO — store unsubscribe to clean up on dispose
     this.echoUnsub = this.echo.onMessage((advice) => this.showEchoMessage(advice.message));
 
@@ -198,13 +220,44 @@ export class NeuroMazeScene extends AbstractScene {
   public update(deltaTime: number): void {
     if (this.phase === Phase.COMPLETE || this.phase === Phase.PAUSED) return;
 
-    this.controller.update(deltaTime);
+    // Freeze joueur lors d'une capture (peut encore regarder autour)
+    const frozen = Date.now() < this.frozenUntil;
+    if (!frozen) this.controller.update(deltaTime);
 
-    // Player light always tracks the character, even during intro
+    // Player light suit toujours le personnage
     const lpos = this.controller.getPosition();
     this.playerLight.position.set(lpos.x, lpos.y + 2.2, lpos.z);
 
     if (this.phase === Phase.INTRO) return;
+
+    // ── Sons de pas ──────────────────────────────────────────────────────
+    if (!frozen && this.controller.getIsMoving()) {
+      const running  = this.controller.getIsRunning();
+      const interval = running ? 0.26 : 0.40;
+      this.stepTimer += deltaTime;
+      if (this.stepTimer >= interval) {
+        this.stepTimer = 0;
+        AudioManager.getInstance().playFootstep(running);
+      }
+    } else {
+      this.stepTimer = 0;
+    }
+
+    // ── Drone ────────────────────────────────────────────────────────────
+    if (this.drone) {
+      const { isNear, isCapture, alertLevel } = this.drone.update(deltaTime, lpos);
+
+      // Vignette rouge progressive
+      this.updateDroneVignette(alertLevel);
+      AudioManager.getInstance().setDroneAlertLevel(alertLevel);
+
+      // Annonce d'activation au bon moment
+      if (this.drone.active && !frozen && isNear && alertLevel > 0.05) {
+        // Annonce déjà faite dans startPlaying via timer
+      }
+
+      if (isCapture && !frozen) this.onDroneCapture();
+    }
 
     // PLAYING
     this.elapsed += deltaTime;
@@ -225,6 +278,9 @@ export class NeuroMazeScene extends AbstractScene {
     this.echoUnsub?.();
     document.removeEventListener('keydown', this.escapeListener);
     this.playerLight?.dispose();
+    this.drone?.dispose();
+    AudioManager.getInstance().stopMazeAmbience();
+    AudioManager.getInstance().setDroneAlertLevel(0);
     this.renderer?.dispose();
     this.controller?.dispose();
     this.removeHUD();
@@ -252,6 +308,7 @@ export class NeuroMazeScene extends AbstractScene {
       cell.dataNode = false;
       this.nodesCollected++;
       this.elNodes.textContent = `${this.nodesCollected}/${this.nodesTotal}`;
+      AudioManager.getInstance().playNodeCollect();
 
       const remaining = this.nodesTotal - this.nodesCollected;
       const nodeMsg = pick(MSGS_NODE);
@@ -307,6 +364,7 @@ export class NeuroMazeScene extends AbstractScene {
     this.renderer.animateWallOpen(wallId);
     this.adaptCount++;
     this.elAdapt.textContent = `${this.adaptCount}`;
+    AudioManager.getInstance().playWallOpen();
     this.echo.say(pick(MSGS_ADAPT), AdviceType.TIP);
     this.flashScreen('rgba(50,255,130,0.08)');
     this.updateFog();
@@ -342,8 +400,56 @@ export class NeuroMazeScene extends AbstractScene {
     const secs = Math.floor(this.elapsed % 60).toString().padStart(2, '0');
     this.echo.say(`Sortie atteinte ! Temps : ${mins}:${secs}. ${this.nodesCollected} nœuds.`, AdviceType.ENCOURAGEMENT);
 
-    const { score, rank } = computeScore(this.elapsed, this.nodesCollected, this.adaptCount, this.nodesTotal);
+    const { score, rank } = computeScore(this.elapsed, this.nodesCollected, this.adaptCount, this.nodesTotal, this.captureCount);
     this.showCompleteOverlay(mins, secs, score, rank);
+  }
+
+  // ─── Drone capture ───────────────────────────────────────────────────────────
+
+  private onDroneCapture(): void {
+    this.captureCount++;
+    AudioManager.getInstance().playCapture();
+    AudioManager.getInstance().setDroneAlertLevel(0);
+    this.flashScreen('rgba(255,10,10,0.45)');
+
+    // Mise à jour HUD vies
+    const hearts = ['●●●', '●●○', '●○○', '○○○'];
+    this.elLives.textContent = hearts[Math.min(this.captureCount, 3)];
+
+    const pos = this.controller.getPosition();
+    const { col, row } = this.renderer.worldToCell(pos.x, pos.z);
+    this.drone?.respawn(col, row);
+
+    if (this.captureCount >= 3) {
+      this.echo.say('Trop de captures. Protocole terminé.', AdviceType.OBSERVATION);
+      this.triggerGameOver();
+    } else {
+      const remaining = 3 - this.captureCount;
+      this.echo.say(
+        `Capturé ! ${remaining} chance${remaining > 1 ? 's' : ''} restante${remaining > 1 ? 's' : ''}.`,
+        AdviceType.TIP,
+      );
+      this.frozenUntil = Date.now() + 2000;
+    }
+  }
+
+  private triggerGameOver(): void {
+    if (this.phase === Phase.COMPLETE) return;
+    this.phase = Phase.COMPLETE;
+    AudioManager.getInstance().playDefeat();
+    this.showGameOverOverlay();
+  }
+
+  private updateDroneVignette(alertLevel: number): void {
+    if (!this.droneWarningEl) return;
+    if (alertLevel < 0.01) {
+      this.droneWarningEl.style.boxShadow = 'inset 0 0 0px 0px rgba(255,20,20,0)';
+    } else {
+      const px    = Math.round(alertLevel * 90);
+      const alpha = alertLevel * 0.55;
+      this.droneWarningEl.style.boxShadow =
+        `inset 0 0 ${px}px ${Math.round(px / 3)}px rgba(255,20,20,${alpha.toFixed(2)})`;
+    }
   }
 
   // ─── Screen flash feedback ────────────────────────────────────────────────────
@@ -392,20 +498,36 @@ export class NeuroMazeScene extends AbstractScene {
       letterSpacing:  '0.08em',
     });
 
-    const timerBlock = this.makeHudBlock('TEMPS', '00:00');
-    const nodesBlock = this.makeHudBlock('NŒUDS', `0/${this.nodesTotal}`);
+    const timerBlock = this.makeHudBlock('TEMPS',    '00:00');
+    const nodesBlock = this.makeHudBlock('NŒUDS',    `0/${this.nodesTotal}`);
     const adaptBlock = this.makeHudBlock('ADAPT IA', '0');
-    const escBlock   = this.makeHudBlock('PAUSE', 'ESC');
+    const livesBlock = this.makeHudBlock('VIES',     '●●●');
+    const escBlock   = this.makeHudBlock('PAUSE',    'ESC');
 
     this.elTimer = timerBlock.querySelector('span')!;
     this.elNodes = nodesBlock.querySelector('span')!;
     this.elAdapt = adaptBlock.querySelector('span')!;
+    this.elLives = livesBlock.querySelector('span')!;
+    this.elLives.style.color = '#ff4444';
 
     bar.appendChild(timerBlock);
     bar.appendChild(nodesBlock);
     bar.appendChild(adaptBlock);
+    bar.appendChild(livesBlock);
     bar.appendChild(escBlock);
     this.hudRoot.appendChild(bar);
+
+    // Vignette rouge drone — par-dessus le canvas, invisible tant que le drone est loin
+    this.droneWarningEl = document.createElement('div');
+    Object.assign(this.droneWarningEl.style, {
+      position:       'fixed',
+      inset:          '0',
+      pointerEvents:  'none',
+      zIndex:         '16',
+      boxShadow:      'inset 0 0 0px 0px rgba(255,20,20,0)',
+      transition:     'box-shadow 0.3s ease',
+    });
+    document.body.appendChild(this.droneWarningEl);
 
     // ECHO message toast
     this.elEchoMsg = document.createElement('div');
@@ -472,6 +594,7 @@ export class NeuroMazeScene extends AbstractScene {
     this.hudRoot?.remove();
     this.elEchoMsg?.remove();
     this.minimapCanvas?.remove();
+    this.droneWarningEl?.remove();
     if (this.echoMsgTimer) clearTimeout(this.echoMsgTimer);
   }
 
@@ -654,7 +777,24 @@ export class NeuroMazeScene extends AbstractScene {
 
   private startPlaying(): void {
     this.phase = Phase.PLAYING;
+    AudioManager.getInstance().startMazeAmbience();
     this.echo.say('Labyrinthe actif. Je surveille tes mouvements.', AdviceType.OBSERVATION);
+
+    // Avertissement drone à J-5s avant activation
+    setTimeout(() => {
+      if (this.phase === Phase.PLAYING) {
+        this.echo.say('Attention — un drone de traque va être déployé.', AdviceType.TIP);
+      }
+    }, (DRONE_ACTIVATION_DELAY - 5) * 1000);
+
+    // Confirmation activation drone
+    setTimeout(() => {
+      if (this.phase === Phase.PLAYING) {
+        this.echo.say('Drone actif. Ne le laisse pas t\'approcher.', AdviceType.OBSERVATION);
+        this.flashScreen('rgba(255,20,20,0.15)');
+      }
+    }, DRONE_ACTIVATION_DELAY * 1000);
+
     this.introOverlay.style.opacity    = '0';
     this.introOverlay.style.transition = 'opacity 0.5s';
     setTimeout(() => this.removeIntroOverlay(), 500);
@@ -731,6 +871,41 @@ export class NeuroMazeScene extends AbstractScene {
     btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; btn.style.color = color; });
     btn.addEventListener('click', onClick);
     return btn;
+  }
+
+  // ─── Game over overlay ───────────────────────────────────────────────────────
+
+  private showGameOverOverlay(): void {
+    const overlay = document.createElement('div');
+    Object.assign(overlay.style, {
+      position: 'fixed', inset: '0', background: 'rgba(20,0,0,0.94)',
+      display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', zIndex: '50', fontFamily: '"Courier New", monospace',
+      color: '#ff4444',
+    });
+    const title = document.createElement('h1');
+    title.textContent = 'CAPTURÉ';
+    Object.assign(title.style, { fontSize: '3rem', letterSpacing: '0.3em', textShadow: '0 0 30px #ff2200', margin: '0 0 12px' });
+    const sub = document.createElement('p');
+    sub.textContent = 'Le drone t\'a eu 3 fois.';
+    Object.assign(sub.style, { color: '#aa3333', fontSize: '0.9rem', margin: '0 0 40px' });
+    const btn = document.createElement('button');
+    btn.textContent = 'RETOUR AU HUB';
+    Object.assign(btn.style, {
+      background: 'transparent', border: '2px solid #ff4444', color: '#ff4444',
+      fontSize: '1rem', letterSpacing: '0.15em', padding: '12px 40px', cursor: 'pointer',
+      pointerEvents: 'all', transition: 'background 0.2s, color 0.2s',
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#ff4444'; btn.style.color = '#000'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; btn.style.color = '#ff4444'; });
+    btn.addEventListener('click', async () => {
+      overlay.remove();
+      await SceneManager.getInstance().loadScene('HubScene');
+    });
+    overlay.appendChild(title);
+    overlay.appendChild(sub);
+    overlay.appendChild(btn);
+    document.body.appendChild(overlay);
   }
 
   // ─── Completion overlay ──────────────────────────────────────────────────────

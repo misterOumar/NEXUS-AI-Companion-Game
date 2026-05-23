@@ -3,7 +3,7 @@ import {
   Color3, Color4, Vector3, GlowLayer, Animation, CubicEase,
   EasingFunction, HemisphericLight, DirectionalLight, PointLight,
   ParticleSystem, DynamicTexture, TransformNode, DefaultRenderingPipeline,
-  Observer, Texture,
+  Observer, Texture, ShadowGenerator,
 } from '@babylonjs/core';
 import type { MazeCell } from './MazeGenerator';
 
@@ -34,6 +34,8 @@ export class MazeRenderer {
   private exitPs:          ParticleSystem | null = null;
   private exitPsTex:       DynamicTexture | null = null;
   private stripMeshes:     Mesh[] = [];
+  private ceilingMeshes:   Mesh[] = [];
+  private shadowGen:       ShadowGenerator | null = null;
 
   readonly CELL_SIZE:       number;
   readonly WALL_HEIGHT:     number;
@@ -113,6 +115,7 @@ export class MazeRenderer {
   build(grid: MazeCell[][]): void {
     this.setupLighting();
     this.buildFloor();
+    this.buildCeiling();
     this.buildBoundary();
     this.buildInteriorWalls(grid);
     this.buildExitPortal(grid);
@@ -127,14 +130,63 @@ export class MazeRenderer {
     ambient.diffuse     = new Color3(0.7, 0.75, 1.0);
     ambient.groundColor = new Color3(0.1,  0.1,  0.2);
 
-    const overhead = new DirectionalLight('mazeDir', new Vector3(0, -1, 0.2), this.scene);
+    // Lumière directionelle légèrement inclinée pour des ombres visibles sur le sol
+    const overhead = new DirectionalLight('mazeDir', new Vector3(-0.4, -1, 0.3), this.scene);
+    overhead.position  = new Vector3(0, 20, 0);
     overhead.intensity = 0.6;
     overhead.diffuse   = new Color3(0.8, 0.85, 1.0);
+
+    // Shadow map 1024 — qualité/perf raisonnable pour le labyrinthe
+    this.shadowGen = new ShadowGenerator(1024, overhead);
+    this.shadowGen.useExponentialShadowMap = true;
+    this.shadowGen.darkness = 0.45; // 0 = ombre noire, 1 = pas d'ombre
 
     const center = new PointLight('mazeCenter', new Vector3(0, 8, 0), this.scene);
     center.intensity = 0.6;
     center.range     = Math.max(this.cols, this.rows) * this.CELL_SIZE * 1.5;
     center.diffuse   = new Color3(0.5, 0.65, 1.0);
+  }
+
+  private buildCeiling(): void {
+    const w = this.cols * this.CELL_SIZE + 2;
+    const h = this.rows * this.CELL_SIZE + 2;
+
+    // Plafond métallique sombre, rendu vers le bas (rotation X = π)
+    const ceiling = MeshBuilder.CreateGround('mazeCeiling', { width: w, height: h }, this.scene);
+    ceiling.position.y  = this.WALL_HEIGHT;
+    ceiling.rotation.x  = Math.PI;
+    ceiling.isPickable  = false;
+    // Pas de checkCollisions : le spring arm n'a pas besoin de le détecter
+    // car camera.beta est limité à ~69° et la caméra reste sous le plafond
+
+    const mat = new PBRMaterial('mazeCeilMat', this.scene);
+    mat.albedoColor   = new Color3(0.10, 0.13, 0.20);
+    mat.emissiveColor = new Color3(0.004, 0.006, 0.018);
+    mat.metallic      = 0.90;
+    mat.roughness     = 0.35;
+    ceiling.material  = mat;
+    this.ceilingMeshes.push(ceiling);
+
+    // Grille émissive au plafond — même espacement que le sol, moins lumineuse
+    const gridMat = new StandardMaterial('ceilGridMat', this.scene);
+    gridMat.emissiveColor = new Color3(0.03, 0.07, 0.28);
+    gridMat.alpha         = 0.45;
+
+    const spacing = this.CELL_SIZE;
+    for (let i = 0; i <= this.cols; i++) {
+      const line = MeshBuilder.CreateBox(`cg_x${i}`, { width: 0.05, height: 0.01, depth: h }, this.scene);
+      line.position.set(this.offsetX + i * spacing, this.WALL_HEIGHT - 0.01, 0);
+      line.material  = gridMat;
+      line.isPickable = false;
+      this.ceilingMeshes.push(line);
+    }
+    for (let i = 0; i <= this.rows; i++) {
+      const line = MeshBuilder.CreateBox(`cg_z${i}`, { width: w, height: 0.01, depth: 0.05 }, this.scene);
+      line.position.set(0, this.WALL_HEIGHT - 0.01, this.offsetZ + i * spacing);
+      line.material  = gridMat;
+      line.isPickable = false;
+      this.ceilingMeshes.push(line);
+    }
   }
 
   private buildFloor(): void {
@@ -203,6 +255,7 @@ export class MazeRenderer {
       m.material        = this.sharedWallMat;
       m.checkCollisions = true;
       this.glowLayer.addIncludedOnlyMesh(m);
+      this.shadowGen?.addShadowCaster(m);
     }
   }
 
@@ -237,6 +290,7 @@ export class MazeRenderer {
     m.material        = this.sharedWallMat;
     m.checkCollisions = true;
     this.glowLayer.addIncludedOnlyMesh(m);
+    this.shadowGen?.addShadowCaster(m);
 
     // Arête néon au sommet du mur
     const strip = MeshBuilder.CreateBox(`${id}_strip`, { width: bw, height: 0.05, depth: bd }, this.scene);
@@ -493,6 +547,10 @@ export class MazeRenderer {
 
   // ─── Fog / atmosphere ─────────────────────────────────────────────────────────
 
+  getShadowGenerator(): ShadowGenerator | null {
+    return this.shadowGen;
+  }
+
   setFogDensity(density: number): void {
     this.scene.fogMode    = 3; // FOGMODE_EXP2
     this.scene.fogDensity = density;
@@ -548,6 +606,10 @@ export class MazeRenderer {
     this.exitPsTex?.dispose();
     this.stripMeshes.forEach(m => m.dispose());
     this.stripMeshes = [];
+    this.ceilingMeshes.forEach(m => m.dispose());
+    this.ceilingMeshes = [];
+    this.shadowGen?.dispose();
+    this.shadowGen = null;
     this.pipeline?.dispose();
   }
 }
