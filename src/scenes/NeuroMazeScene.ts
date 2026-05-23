@@ -22,7 +22,7 @@ const EXIT_DIST      = 2.2;
 const NEAR_EXIT_DIST = 18;
 const FOG_BASE       = 0.012;
 const FOG_MAX        = 0.05;
-const MINIMAP_CS     = 13;   // minimap pixels per cell
+const MINIMAP_CS     = 16;   // minimap pixels per cell
 
 // ─── ECHO message pools ───────────────────────────────────────────────────────
 const MSGS_ADAPT = [
@@ -42,6 +42,17 @@ const MSGS_NEAR_EXIT = [
   'Signal de sortie détecté. Converge vers lui.',
   'Tu y es presque. Ne t\'arrête pas maintenant.',
 ];
+const MSGS_LOOP = [
+  'Trajectoire circulaire détectée. Cherche une autre voie.',
+  'Tu tournes en rond. Analyse en cours — recalibration.',
+  'Boucle comportementale identifiée. Explore un couloir différent.',
+  'Mes capteurs détectent un pattern répétitif. Bifurque.',
+];
+
+const HACK_DURATION   = 2.0;  // secondes pour collecter un nœud
+const LOOP_WINDOW     = 25;   // taille de la fenêtre glissante (cells)
+const LOOP_THRESHOLD  = 4;    // visites min d\'une même cellule pour détecter un boucle
+const LOOP_COOLDOWN   = 20;   // secondes entre deux alertes de boucle
 
 function pick<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -109,6 +120,16 @@ export class NeuroMazeScene extends AbstractScene {
   private captureCount:   number = 0;
   private frozenUntil:    number = 0;
   private droneWarningEl: HTMLDivElement | null = null;
+
+  // Hack timer (node collection)
+  private hackTarget:     { col: number; row: number } | null = null;
+  private hackProgress:   number = 0;
+  private hackBarEl:      HTMLDivElement | null = null;
+  private hackFillEl:     HTMLDivElement | null = null;
+
+  // Circular path detection
+  private recentCells:    string[] = [];
+  private circularCooldown: number = 0;
 
   // Audio
   private stepTimer:      number = 0;
@@ -262,7 +283,7 @@ export class NeuroMazeScene extends AbstractScene {
     // PLAYING
     this.elapsed += deltaTime;
     this.updateHUDTimer();
-    this.checkNodePickup();
+    this.checkNodePickup(deltaTime);
     this.checkHesitation(deltaTime);
     this.checkExit();
 
@@ -291,41 +312,134 @@ export class NeuroMazeScene extends AbstractScene {
 
   // ─── Game logic ─────────────────────────────────────────────────────────────
 
-  private checkNodePickup(): void {
+  private checkNodePickup(deltaTime: number): void {
     const pos = this.controller.getPosition();
     const { col, row } = this.renderer.worldToCell(pos.x, pos.z);
-    if (col < 0 || col >= MAZE_COLS || row < 0 || row >= MAZE_ROWS) return;
+
+    if (col < 0 || col >= MAZE_COLS || row < 0 || row >= MAZE_ROWS) {
+      this.cancelHack();
+      return;
+    }
 
     const cell = this.generator.getCell(col, row);
-    if (!cell?.dataNode) return;
+    if (!cell?.dataNode) { this.cancelHack(); return; }
 
     const nodeWorld = this.renderer.cellToWorld(col, row);
     const dist = Math.sqrt((pos.x - nodeWorld.x) ** 2 + (pos.z - nodeWorld.z) ** 2);
-    if (dist > NODE_PICK_DIST) return;
+    if (dist > NODE_PICK_DIST) { this.cancelHack(); return; }
 
-    const collected = this.renderer.collectNode(col, row);
-    if (collected) {
-      cell.dataNode = false;
-      this.nodesCollected++;
-      this.elNodes.textContent = `${this.nodesCollected}/${this.nodesTotal}`;
-      AudioManager.getInstance().playNodeCollect();
-
-      const remaining = this.nodesTotal - this.nodesCollected;
-      const nodeMsg = pick(MSGS_NODE);
-      const suffixMsg = remaining === 0
-        ? 'Tous les nœuds collectés.'
-        : `${remaining} restant${remaining > 1 ? 's' : ''}.`;
-      this.echo.say(`${nodeMsg} ${suffixMsg}`, AdviceType.ENCOURAGEMENT);
-      this.flashScreen('rgba(220,180,0,0.12)');
+    // Start hacking this node if it's a new target
+    if (!this.hackTarget || this.hackTarget.col !== col || this.hackTarget.row !== row) {
+      this.hackTarget   = { col, row };
+      this.hackProgress = 0;
+      if (!this.hackBarEl) this.createHackBar();
+      this.hackBarEl!.style.display = 'block';
     }
+
+    this.hackProgress += deltaTime;
+    const pct = Math.min(1, this.hackProgress / HACK_DURATION) * 100;
+    if (this.hackFillEl) this.hackFillEl.style.width = `${pct.toFixed(1)}%`;
+
+    if (this.hackProgress >= HACK_DURATION) {
+      this.cancelHack();
+      const collected = this.renderer.collectNode(col, row);
+      if (collected) {
+        cell.dataNode = false;
+        this.nodesCollected++;
+        this.elNodes.textContent = `${this.nodesCollected}/${this.nodesTotal}`;
+        AudioManager.getInstance().playNodeCollect();
+
+        const remaining = this.nodesTotal - this.nodesCollected;
+        const nodeMsg = pick(MSGS_NODE);
+        const suffixMsg = remaining === 0
+          ? 'Tous les nœuds collectés.'
+          : `${remaining} restant${remaining > 1 ? 's' : ''}.`;
+        this.echo.say(`${nodeMsg} ${suffixMsg}`, AdviceType.ENCOURAGEMENT);
+        this.flashScreen('rgba(220,180,0,0.12)');
+      }
+    }
+  }
+
+  private cancelHack(): void {
+    if (this.hackTarget === null) return;
+    this.hackTarget   = null;
+    this.hackProgress = 0;
+    if (this.hackBarEl) this.hackBarEl.style.display = 'none';
+    if (this.hackFillEl) this.hackFillEl.style.width = '0%';
+  }
+
+  private createHackBar(): void {
+    this.hackBarEl = document.createElement('div');
+    Object.assign(this.hackBarEl.style, {
+      position:       'fixed',
+      bottom:         '80px',
+      left:           '50%',
+      transform:      'translateX(-50%)',
+      width:          '200px',
+      background:     'rgba(0,10,30,0.88)',
+      border:         '1px solid #00ff7f55',
+      borderRadius:   '5px',
+      padding:        '7px 12px 8px',
+      pointerEvents:  'none',
+      zIndex:         '25',
+      fontFamily:     '"Courier New", monospace',
+      display:        'none',
+    });
+
+    const label = document.createElement('div');
+    label.textContent = 'EXTRACTION EN COURS...';
+    Object.assign(label.style, {
+      color:          '#00ff7f',
+      fontSize:       '10px',
+      letterSpacing:  '0.1em',
+      marginBottom:   '5px',
+    });
+
+    const track = document.createElement('div');
+    Object.assign(track.style, {
+      background:   '#0a1a0a',
+      height:       '6px',
+      borderRadius: '3px',
+      overflow:     'hidden',
+    });
+
+    this.hackFillEl = document.createElement('div');
+    Object.assign(this.hackFillEl.style, {
+      background:   'linear-gradient(90deg, #00aa55, #00ff7f)',
+      height:       '100%',
+      width:        '0%',
+      borderRadius: '3px',
+    });
+
+    track.appendChild(this.hackFillEl);
+    this.hackBarEl.appendChild(label);
+    this.hackBarEl.appendChild(track);
+    document.body.appendChild(this.hackBarEl);
   }
 
   private checkHesitation(deltaTime: number): void {
     const pos = this.controller.getPosition();
     const { col, row } = this.renderer.worldToCell(pos.x, pos.z);
+    const cellKey = `${col},${row}`;
 
     // Track visited cells for minimap
-    this.visitedCells.add(`${col},${row}`);
+    this.visitedCells.add(cellKey);
+
+    // Sliding window for circular-path detection
+    this.recentCells.push(cellKey);
+    if (this.recentCells.length > LOOP_WINDOW) this.recentCells.shift();
+
+    if (this.circularCooldown > 0) {
+      this.circularCooldown -= deltaTime;
+    } else if (this.recentCells.length >= LOOP_WINDOW) {
+      const counts = new Map<string, number>();
+      for (const k of this.recentCells) counts.set(k, (counts.get(k) ?? 0) + 1);
+      const maxVisits = Math.max(...counts.values());
+      if (maxVisits >= LOOP_THRESHOLD) {
+        this.circularCooldown = LOOP_COOLDOWN;
+        this.echo.say(pick(MSGS_LOOP), AdviceType.TIP);
+      }
+    }
 
     // Progress = Manhattan distance to exit
     const dist = Math.abs(col - (MAZE_COLS - 1)) + Math.abs(row - (MAZE_ROWS - 1));
@@ -595,6 +709,7 @@ export class NeuroMazeScene extends AbstractScene {
     this.elEchoMsg?.remove();
     this.minimapCanvas?.remove();
     this.droneWarningEl?.remove();
+    this.hackBarEl?.remove();
     if (this.echoMsgTimer) clearTimeout(this.echoMsgTimer);
   }
 

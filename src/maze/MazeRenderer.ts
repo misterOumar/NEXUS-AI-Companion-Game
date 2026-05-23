@@ -35,7 +35,10 @@ export class MazeRenderer {
   private exitPsTex:       DynamicTexture | null = null;
   private stripMeshes:     Mesh[] = [];
   private ceilingMeshes:   Mesh[] = [];
+  private corridorMeshes:  Mesh[] = [];
   private shadowGen:       ShadowGenerator | null = null;
+  private ambientPs:       ParticleSystem | null = null;
+  private ambientPsTex:    DynamicTexture | null = null;
 
   readonly CELL_SIZE:       number;
   readonly WALL_HEIGHT:     number;
@@ -118,6 +121,8 @@ export class MazeRenderer {
     this.buildCeiling();
     this.buildBoundary();
     this.buildInteriorWalls(grid);
+    this.buildCorridorObjects(grid);
+    this.buildAmbientParticles();
     this.buildExitPortal(grid);
     this.buildStartMarker();
     this.buildDataNodes(grid);
@@ -235,6 +240,205 @@ export class MazeRenderer {
       line.position.set(0, 0.01, this.offsetZ + i * spacing);
       line.material = gridMat;
     }
+  }
+
+  // ─── Objets décoratifs dans les couloirs ──────────────────────────────────────
+
+  private buildCorridorObjects(grid: MazeCell[][]): void {
+    const cs     = this.CELL_SIZE;
+    const offset = cs / 2 - 0.75; // distance centre → face de l'objet (2.25 u)
+
+    // Direction mur → décalage XZ + rotation Y de l'objet (face vers l'intérieur)
+    const wallMeta: Record<string, { dx: number; dz: number; ry: number }> = {
+      N: { dx:  0, dz: -1, ry: 0           },
+      S: { dx:  0, dz:  1, ry: Math.PI     },
+      E: { dx:  1, dz:  0, ry: Math.PI / 2 },
+      W: { dx: -1, dz:  0, ry: -Math.PI / 2},
+    };
+
+    let idx = 0;
+    for (let r = 0; r < this.rows; r++) {
+      for (let c = 0; c < this.cols; c++) {
+        const cell = grid[r][c];
+        if (cell.isStart || cell.isExit || cell.dataNode) { idx++; continue; }
+        if (idx % 8 !== 0) { idx++; continue; }
+
+        // Trouve les murs fermés (hors bord) utilisables pour appui
+        const dirs = (['N', 'E', 'S', 'W'] as const).filter(d => {
+          if (!cell.walls[d]) return false;
+          const dc = d === 'E' ? 1 : d === 'W' ? -1 : 0;
+          const dr = d === 'S' ? 1 : d === 'N' ? -1 : 0;
+          const nc = c + dc; const nr = r + dr;
+          return nc >= 0 && nc < this.cols && nr >= 0 && nr < this.rows;
+        });
+
+        if (dirs.length === 0) { idx++; continue; }
+
+        const dir  = dirs[idx % dirs.length];
+        const meta = wallMeta[dir];
+        const { x, z } = this.cellToWorld(c, r);
+        const ox = x + meta.dx * offset;
+        const oz = z + meta.dz * offset;
+        const type = idx % 3;
+
+        if (type === 0) this.spawnServerRack(idx, ox, oz, meta.ry);
+        else if (type === 1) this.spawnTerminal(idx, ox, oz, meta.ry);
+        else this.spawnConduit(idx, ox, oz);
+
+        idx++;
+      }
+    }
+  }
+
+  private spawnServerRack(id: number, x: number, z: number, ry: number): void {
+    const body = MeshBuilder.CreateBox(`srv_${id}`, { width: 0.5, height: 1.6, depth: 0.4 }, this.scene);
+    body.position.set(x, 0.8, z);
+    body.rotation.y   = ry;
+    body.isPickable   = false;
+    body.checkCollisions = true;
+    const mat = new PBRMaterial(`srvMat_${id}`, this.scene);
+    mat.albedoColor   = new Color3(0.06, 0.08, 0.14);
+    mat.emissiveColor = new Color3(0.008, 0.012, 0.03);
+    mat.metallic      = 0.85;
+    mat.roughness     = 0.35;
+    body.material     = mat;
+    this.corridorMeshes.push(body);
+
+    // Bandes émissives horizontales sur la face avant
+    const stripColors = [
+      new Color3(0.08, 0.45, 1.0),
+      new Color3(0.0,  0.85, 0.4),
+      new Color3(0.08, 0.45, 1.0),
+    ];
+    stripColors.forEach((col, i) => {
+      const strip = MeshBuilder.CreateBox(`srv_s${id}_${i}`, { width: 0.42, height: 0.04, depth: 0.02 }, this.scene);
+      strip.position.set(0, -0.45 + i * 0.38, 0.21);
+      strip.parent    = body;
+      strip.isPickable = false;
+      const sm = new StandardMaterial(`srv_sm${id}_${i}`, this.scene);
+      sm.emissiveColor = col;
+      strip.material  = sm;
+      this.glowLayer.addIncludedOnlyMesh(strip);
+      this.corridorMeshes.push(strip);
+    });
+
+    // Petite LED clignotante sur le dessus
+    const led = MeshBuilder.CreateSphere(`srv_led${id}`, { diameter: 0.06 }, this.scene);
+    led.position.set(0.18, 0.82, 0.22);
+    led.parent      = body;
+    led.isPickable  = false;
+    const lm = new StandardMaterial(`srv_lm${id}`, this.scene);
+    lm.emissiveColor = new Color3(0.0, 1.0, 0.3);
+    led.material    = lm;
+    this.glowLayer.addIncludedOnlyMesh(led);
+    this.corridorMeshes.push(led);
+  }
+
+  private spawnTerminal(id: number, x: number, z: number, ry: number): void {
+    // Socle
+    const base = MeshBuilder.CreateBox(`trm_base${id}`, { width: 0.65, height: 0.08, depth: 0.45 }, this.scene);
+    base.position.set(x, 0.04, z);
+    base.rotation.y   = ry;
+    base.isPickable   = false;
+    base.checkCollisions = true;
+    const bm = new PBRMaterial(`trm_bm${id}`, this.scene);
+    bm.albedoColor = new Color3(0.08, 0.09, 0.13); bm.metallic = 0.8; bm.roughness = 0.4;
+    base.material  = bm;
+    this.corridorMeshes.push(base);
+
+    // Panneau vertical
+    const panel = MeshBuilder.CreateBox(`trm_p${id}`, { width: 0.6, height: 1.0, depth: 0.22 }, this.scene);
+    panel.position.set(0, 0.54, 0);
+    panel.parent    = base;
+    panel.isPickable = false;
+    panel.material  = bm;
+    this.corridorMeshes.push(panel);
+
+    // Écran émissif
+    const screen = MeshBuilder.CreateBox(`trm_scr${id}`, { width: 0.5, height: 0.38, depth: 0.02 }, this.scene);
+    screen.position.set(0, 0.1, 0.12);
+    screen.parent   = panel;
+    screen.isPickable = false;
+    const sm = new StandardMaterial(`trm_sm${id}`, this.scene);
+    sm.emissiveColor = new Color3(0.05, 0.35, 0.9);
+    screen.material  = sm;
+    this.glowLayer.addIncludedOnlyMesh(screen);
+    this.corridorMeshes.push(screen);
+
+    // Petite ligne de texte (rectangle fin)
+    const txt = MeshBuilder.CreateBox(`trm_txt${id}`, { width: 0.4, height: 0.03, depth: 0.01 }, this.scene);
+    txt.position.set(0, -0.2, 0.125);
+    txt.parent     = panel;
+    txt.isPickable = false;
+    const tm = new StandardMaterial(`trm_tm${id}`, this.scene);
+    tm.emissiveColor = new Color3(0.0, 0.6, 0.3);
+    txt.material   = tm;
+    this.corridorMeshes.push(txt);
+  }
+
+  private spawnConduit(id: number, x: number, z: number): void {
+    // Tube central fin
+    const tube = MeshBuilder.CreateCylinder(`cdt_${id}`, { height: this.WALL_HEIGHT - 0.1, diameter: 0.1, tessellation: 8 }, this.scene);
+    tube.position.set(x, (this.WALL_HEIGHT - 0.1) / 2, z);
+    tube.isPickable = false;
+    const tm = new PBRMaterial(`cdt_tm${id}`, this.scene);
+    tm.albedoColor = new Color3(0.1, 0.12, 0.18); tm.metallic = 0.9; tm.roughness = 0.3;
+    tube.material  = tm;
+    this.corridorMeshes.push(tube);
+
+    // Anneaux émissifs à différentes hauteurs
+    const ringHeights = [0.5, 1.8, 3.1];
+    const ringColor   = new Color3(0.1, 0.5, 1.0);
+    ringHeights.forEach((h, i) => {
+      const ring = MeshBuilder.CreateTorus(`cdt_r${id}_${i}`, { diameter: 0.26, thickness: 0.04, tessellation: 16 }, this.scene);
+      ring.position.set(x, h, z);
+      ring.isPickable = false;
+      const rm = new StandardMaterial(`cdt_rm${id}_${i}`, this.scene);
+      rm.emissiveColor = ringColor;
+      ring.material    = rm;
+      this.glowLayer.addIncludedOnlyMesh(ring);
+      this.corridorMeshes.push(ring);
+    });
+  }
+
+  // ─── Particules ambiantes ─────────────────────────────────────────────────────
+
+  private buildAmbientParticles(): void {
+    const tex = new DynamicTexture('ambDustTex', { width: 8, height: 8 }, this.scene, false);
+    const ctx = tex.getContext();
+    const g   = ctx.createRadialGradient(4, 4, 0, 4, 4, 4);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 8, 8);
+    tex.update();
+
+    const ps = new ParticleSystem('ambDust', 180, this.scene);
+    ps.particleTexture = tex;
+
+    // Boîte d'émission = tout le labyrinthe
+    const hw = (this.cols * this.CELL_SIZE) / 2;
+    const hh = (this.rows * this.CELL_SIZE) / 2;
+    ps.emitter   = new Vector3(0, 1.0, 0);
+    ps.minEmitBox = new Vector3(-hw, 0.2, -hh);
+    ps.maxEmitBox = new Vector3( hw, this.WALL_HEIGHT - 0.5, hh);
+
+    ps.color1    = new Color4(0.3, 0.6, 1.0, 0.35);
+    ps.color2    = new Color4(0.5, 0.8, 1.0, 0.18);
+    ps.colorDead = new Color4(0.2, 0.4, 0.9, 0.0);
+
+    ps.minSize      = 0.02; ps.maxSize      = 0.07;
+    ps.minLifeTime  = 5.0;  ps.maxLifeTime  = 10.0;
+    ps.emitRate     = 22;
+
+    // Dérive lente vers le haut
+    ps.direction1   = new Vector3(-0.08, 0.25, -0.08);
+    ps.direction2   = new Vector3( 0.08, 0.70,  0.08);
+    ps.minEmitPower = 0.08; ps.maxEmitPower = 0.25;
+    ps.gravity      = Vector3.Zero();
+
+    ps.start();
+    this.ambientPs    = ps;
+    this.ambientPsTex = tex;
   }
 
   private buildBoundary(): void {
@@ -608,6 +812,13 @@ export class MazeRenderer {
     this.stripMeshes = [];
     this.ceilingMeshes.forEach(m => m.dispose());
     this.ceilingMeshes = [];
+    this.corridorMeshes.forEach(m => m.dispose());
+    this.corridorMeshes = [];
+    this.ambientPs?.stop();
+    this.ambientPs?.dispose();
+    this.ambientPs = null;
+    this.ambientPsTex?.dispose();
+    this.ambientPsTex = null;
     this.shadowGen?.dispose();
     this.shadowGen = null;
     this.pipeline?.dispose();
