@@ -164,16 +164,17 @@ export class MazeDrone {
 
     // Distances
     const d2p        = Vector3.Distance(this.mesh.position, playerPos);
-    const alertLevel = d2p < WARNING_DIST
+    const alertRaw   = d2p < WARNING_DIST
       ? Math.max(0, 1 - (d2p - CAPTURE_DIST) / (WARNING_DIST - CAPTURE_DIST))
       : 0;
+    const alertLevel = Math.min(1, alertRaw);
 
     this.light.intensity = 0.4 + alertLevel * 2.0;
 
     return {
       isNear:     d2p < WARNING_DIST,
       isCapture:  d2p < CAPTURE_DIST,
-      alertLevel: Math.min(1, alertLevel),
+      alertLevel,
     };
   }
 

@@ -116,10 +116,12 @@ export class NeuroMazeScene extends AbstractScene {
   private playerLight!:   PointLight;
 
   // Drone IA
-  private drone:          MazeDrone | null = null;
-  private captureCount:   number = 0;
-  private frozenUntil:    number = 0;
-  private droneWarningEl: HTMLDivElement | null = null;
+  private drone:           MazeDrone | null = null;
+  private captureCount:    number = 0;
+  private frozenUntil:     number = 0;
+  private lastCaptureTime: number = -Infinity;
+  private droneTimers:     ReturnType<typeof setTimeout>[] = [];
+  private droneWarningEl:  HTMLDivElement | null = null;
 
   // Hack timer (node collection)
   private hackTarget:     { col: number; row: number } | null = null;
@@ -298,6 +300,8 @@ export class NeuroMazeScene extends AbstractScene {
   public async dispose(): Promise<void> {
     this.echoUnsub?.();
     document.removeEventListener('keydown', this.escapeListener);
+    this.droneTimers.forEach(t => clearTimeout(t));
+    this.droneTimers = [];
     this.playerLight?.dispose();
     this.drone?.dispose();
     AudioManager.getInstance().stopMazeAmbience();
@@ -434,7 +438,8 @@ export class NeuroMazeScene extends AbstractScene {
     } else if (this.recentCells.length >= LOOP_WINDOW) {
       const counts = new Map<string, number>();
       for (const k of this.recentCells) counts.set(k, (counts.get(k) ?? 0) + 1);
-      const maxVisits = Math.max(...counts.values());
+      let maxVisits = 0;
+      for (const v of counts.values()) if (v > maxVisits) maxVisits = v;
       if (maxVisits >= LOOP_THRESHOLD) {
         this.circularCooldown = LOOP_COOLDOWN;
         this.echo.say(pick(MSGS_LOOP), AdviceType.TIP);
@@ -521,6 +526,11 @@ export class NeuroMazeScene extends AbstractScene {
   // ─── Drone capture ───────────────────────────────────────────────────────────
 
   private onDroneCapture(): void {
+    // Debounce : ignore si une capture s'est produite dans les 3 dernières secondes
+    const now = Date.now();
+    if (now - this.lastCaptureTime < 3000) return;
+    this.lastCaptureTime = now;
+
     this.captureCount++;
     AudioManager.getInstance().playCapture();
     AudioManager.getInstance().setDroneAlertLevel(0);
@@ -896,19 +906,19 @@ export class NeuroMazeScene extends AbstractScene {
     this.echo.say('Labyrinthe actif. Je surveille tes mouvements.', AdviceType.OBSERVATION);
 
     // Avertissement drone à J-5s avant activation
-    setTimeout(() => {
+    this.droneTimers.push(setTimeout(() => {
       if (this.phase === Phase.PLAYING) {
         this.echo.say('Attention — un drone de traque va être déployé.', AdviceType.TIP);
       }
-    }, (DRONE_ACTIVATION_DELAY - 5) * 1000);
+    }, (DRONE_ACTIVATION_DELAY - 5) * 1000));
 
     // Confirmation activation drone
-    setTimeout(() => {
+    this.droneTimers.push(setTimeout(() => {
       if (this.phase === Phase.PLAYING) {
         this.echo.say('Drone actif. Ne le laisse pas t\'approcher.', AdviceType.OBSERVATION);
         this.flashScreen('rgba(255,20,20,0.15)');
       }
-    }, DRONE_ACTIVATION_DELAY * 1000);
+    }, DRONE_ACTIVATION_DELAY * 1000));
 
     this.introOverlay.style.opacity    = '0';
     this.introOverlay.style.transition = 'opacity 0.5s';

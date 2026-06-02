@@ -18,11 +18,12 @@ export class AudioManager {
   private ambienceRunning = false;
 
   // Maze-specific
-  private mazeAmbiOsc:   OscillatorNode | null = null;
-  private mazeAmbiGain:  GainNode       | null = null;
+  private mazeAmbiOsc:    OscillatorNode | null = null;
+  private mazeAmbiLfoOsc: OscillatorNode | null = null;
+  private mazeAmbiGain:   GainNode       | null = null;
   private mazeAmbiRunning = false;
-  private alertOsc:   OscillatorNode | null = null;
-  private alertGain:  GainNode       | null = null;
+  private alertOsc:    OscillatorNode | null = null;
+  private alertGain:   GainNode       | null = null;
 
   private constructor() {}
 
@@ -263,8 +264,9 @@ export class AudioManager {
     osc.connect(filter); filter.connect(gain); gain.connect(this.getMaster());
     osc.start(); lfo.start();
 
-    this.mazeAmbiOsc  = osc;
-    this.mazeAmbiGain = gain;
+    this.mazeAmbiOsc    = osc;
+    this.mazeAmbiLfoOsc = lfo;
+    this.mazeAmbiGain   = gain;
     this.mazeAmbiRunning = true;
   }
 
@@ -273,9 +275,16 @@ export class AudioManager {
     const ctx = this.getCtx();
     this.mazeAmbiGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.8);
     const osc = this.mazeAmbiOsc;
-    setTimeout(() => { try { osc.stop(); } catch { /* already stopped */ } }, 900);
-    this.mazeAmbiOsc = null; this.mazeAmbiGain = null;
-    this.mazeAmbiRunning = false;
+    const lfo = this.mazeAmbiLfoOsc;
+    // Keep mazeAmbiRunning=true until fade completes to prevent race-condition double-start
+    setTimeout(() => {
+      try { osc.stop(); } catch { /* already stopped */ }
+      try { lfo?.stop(); } catch { /* already stopped */ }
+      this.mazeAmbiRunning = false;
+    }, 900);
+    this.mazeAmbiOsc    = null;
+    this.mazeAmbiLfoOsc = null;
+    this.mazeAmbiGain   = null;
   }
 
   /** Pas sur sol métallique */
@@ -335,6 +344,10 @@ export class AudioManager {
       if (this.alertGain) {
         const ctx = this.getCtx();
         this.alertGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+        const osc = this.alertOsc;
+        this.alertOsc  = null;
+        this.alertGain = null;
+        setTimeout(() => { try { osc?.stop(); } catch { /* already stopped */ } }, 500);
       }
       return;
     }
@@ -374,7 +387,7 @@ export class AudioManager {
       this.master.gain.value = 0.75;
       this.master.connect(this.ctx.destination);
     }
-    if (this.ctx.state === 'suspended') this.ctx.resume();
+    if (this.ctx.state === 'suspended') void this.ctx.resume();
     return this.ctx;
   }
 

@@ -36,6 +36,9 @@ export class MazeRenderer {
   private stripMeshes:     Mesh[] = [];
   private ceilingMeshes:   Mesh[] = [];
   private corridorMeshes:  Mesh[] = [];
+  private boundaryMeshes:  Mesh[] = [];
+  private floorLineMeshes: Mesh[] = [];
+  private exitLight:       PointLight | null = null;
   private shadowGen:       ShadowGenerator | null = null;
   private ambientPs:       ParticleSystem | null = null;
   private ambientPsTex:    DynamicTexture | null = null;
@@ -234,11 +237,13 @@ export class MazeRenderer {
       const line = MeshBuilder.CreateBox(`gl_x${i}`, { width: 0.06, height: 0.02, depth: h }, this.scene);
       line.position.set(this.offsetX + i * spacing, 0.01, 0);
       line.material = gridMat;
+      this.floorLineMeshes.push(line);
     }
     for (let i = 0; i <= this.rows; i++) {
       const line = MeshBuilder.CreateBox(`gl_z${i}`, { width: w, height: 0.02, depth: 0.06 }, this.scene);
       line.position.set(0, 0.01, this.offsetZ + i * spacing);
       line.material = gridMat;
+      this.floorLineMeshes.push(line);
     }
   }
 
@@ -460,6 +465,7 @@ export class MazeRenderer {
       m.checkCollisions = true;
       this.glowLayer.addIncludedOnlyMesh(m);
       this.shadowGen?.addShadowCaster(m);
+      this.boundaryMeshes.push(m);
     }
   }
 
@@ -547,10 +553,10 @@ export class MazeRenderer {
 
     this.buildExitParticles(new Vector3(x, 0, z));
 
-    const pLight = new PointLight('exitLight', new Vector3(x, 2, z), this.scene);
-    pLight.diffuse   = C_EXIT_EMI;
-    pLight.intensity = 1.8;
-    pLight.range     = 10;
+    this.exitLight = new PointLight('exitLight', new Vector3(x, 2, z), this.scene);
+    this.exitLight.diffuse   = C_EXIT_EMI;
+    this.exitLight.intensity = 1.8;
+    this.exitLight.range     = 10;
 
     this.portalObserver = this.scene.onBeforeRenderObservable.add(() => {
       const t = performance.now() / 1000;
@@ -806,12 +812,19 @@ export class MazeRenderer {
     this.nodeMeshes.clear();
     this.nodeLights.clear();
     this.burstTex?.dispose();
+    this.exitPs?.stop();
     this.exitPs?.dispose();
     this.exitPsTex?.dispose();
+    this.exitLight?.dispose();
+    this.exitLight = null;
     this.stripMeshes.forEach(m => m.dispose());
     this.stripMeshes = [];
+    this.floorLineMeshes.forEach(m => m.dispose());
+    this.floorLineMeshes = [];
     this.ceilingMeshes.forEach(m => m.dispose());
     this.ceilingMeshes = [];
+    this.boundaryMeshes.forEach(m => m.dispose());
+    this.boundaryMeshes = [];
     this.corridorMeshes.forEach(m => m.dispose());
     this.corridorMeshes = [];
     this.ambientPs?.stop();
