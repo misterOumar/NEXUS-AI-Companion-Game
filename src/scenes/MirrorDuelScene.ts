@@ -10,11 +10,16 @@ import {
   ArcRotateCamera,
   HemisphericLight,
   PointLight,
+  DirectionalLight,
+  ShadowGenerator,
   DefaultRenderingPipeline,
   ParticleSystem,
   DynamicTexture,
   SceneLoader,
   AbstractMesh,
+  Observer,
+  Scene,
+  Texture,
 } from '@babylonjs/core';
 import '@babylonjs/loaders/glTF';
 import { AbstractScene }             from './AbstractScene';
@@ -83,6 +88,36 @@ export class MirrorDuelScene extends AbstractScene {
   private heatmap!:      HeatmapRenderer;
   private gameState!:    GameState;
 
+  // ── Environnement arène
+  private arenaDome:        Mesh | null = null;
+  private pillarMeshes:     Mesh[] = [];
+  private pillarLights:     PointLight[] = [];
+  private decalMeshes:      Mesh[] = [];
+  private wallMeshes:       Mesh[] = [];
+  private arenaAnimObs:     Observer<Scene> | null = null;
+  private shadowGen:        ShadowGenerator | null = null;
+
+  // ── Lumières suivant les personnages
+  private playerFollowLight: PointLight | null = null;
+  private cloneFollowLight:  PointLight | null = null;
+
+  // ── Scan observation (O4)
+  private scanBeam:          Mesh | null = null;
+  private scanRoot:          Mesh | null = null;
+  private scanObs:           Observer<Scene> | null = null;
+
+  // ── Aura clone par round (O1)
+  private cloneAuraRing2:    Mesh | null = null;
+  private cloneAuraRing3:    Mesh | null = null;
+  private cloneAuraPs:       ParticleSystem | null = null;
+  private cloneAuraPsTex:    DynamicTexture | null = null;
+
+  // ── Particules ambiantes + trail (R5)
+  private ambientPs:     ParticleSystem | null = null;
+  private ambientPsTex:  DynamicTexture | null = null;
+  private cloneTrailPs:  ParticleSystem | null = null;
+  private cloneTrailTex: DynamicTexture | null = null;
+
   // ── Assets GLB
   private playerRoot:    AbstractMesh | null = null;
   private cloneRoot:     AbstractMesh | null = null;
@@ -114,7 +149,12 @@ export class MirrorDuelScene extends AbstractScene {
   private analysisTimer:       number = 0;
 
   // ── UI DOM
-  private hudOverlay!: HTMLElement;
+  private hudOverlay!:    HTMLElement;
+  private introOverlay:   HTMLDivElement | null = null;
+  private pauseOverlay:   HTMLDivElement | null = null;
+  private introTimers:    ReturnType<typeof setTimeout>[] = [];
+  private isPaused:       boolean = false;
+  private escListener!:   (e: KeyboardEvent) => void;
 
   // ═══════════════════════════════════════════════════════════════════════════
   //  CYCLE DE VIE
@@ -140,58 +180,58 @@ export class MirrorDuelScene extends AbstractScene {
     await this.loadCharacterModels();
   }
 
-  /** Charge character.glb pour joueur et clone (fallback silencieux si absent) */
+  /** Charge character.glb — matériaux GLB originaux conservés, couleur via lumières */
   private async loadCharacterModels(): Promise<void> {
     try {
-      const result = await SceneLoader.ImportMeshAsync('', '/models/', 'character.glb', this.scene);
-      if (result.meshes.length === 0) return;
+      // Joueur
+      const r1 = await SceneLoader.ImportMeshAsync('', '/models/', 'character.glb', this.scene);
+      if (r1.meshes.length > 0) {
+        const root = r1.meshes[0];
+        root.name     = 'playerGLB';
+        root.position = this.playerPos.clone();
+        root.scaling  = new Vector3(0.9, 0.9, 0.9);
+        r1.meshes.forEach(m => {
+          if (m instanceof Mesh) this.shadowGen?.addShadowCaster(m);
+        });
+        this.playerRoot = root;
+        this.playerMesh.setEnabled(false);
+      }
 
-      // Joueur — racine
-      const playerRoot = result.meshes[0];
-      playerRoot.name     = 'playerGLB';
-      playerRoot.position = this.playerPos.clone();
-      playerRoot.scaling  = new Vector3(0.9, 0.9, 0.9);
-      this.applyEmissiveMaterial(result.meshes, new Color3(0.0, 0.5, 1.0), new Color3(0.1, 0.6, 0.9));
-      this.playerRoot = playerRoot;
-
-      // Clone — second import
-      const result2 = await SceneLoader.ImportMeshAsync('', '/models/', 'character.glb', this.scene);
-      const cloneRoot = result2.meshes[0];
-      cloneRoot.name     = 'cloneGLB';
-      cloneRoot.position = this.clonePos.clone();
-      cloneRoot.scaling  = new Vector3(0.9, 0.9, 0.9);
-      this.applyEmissiveMaterial(result2.meshes, new Color3(0.8, 0.1, 1.0), new Color3(0.6, 0.0, 0.8), 0.45);
-      this.cloneRoot = cloneRoot;
-
-      // Masquer les capsules de fallback dès que les GLB sont chargés
-      this.playerMesh.setEnabled(false);
-      this.cloneMesh.setEnabled(false);
+      // Clone — second import du même fichier
+      const r2 = await SceneLoader.ImportMeshAsync('', '/models/', 'character.glb', this.scene);
+      if (r2.meshes.length > 0) {
+        const root = r2.meshes[0];
+        root.name     = 'cloneGLB';
+        root.position = this.clonePos.clone();
+        root.scaling  = new Vector3(0.9, 0.9, 0.9);
+        // Légère teinte violette sur les matériaux existants du clone
+        r2.meshes.forEach(m => {
+          if (m instanceof Mesh && m.material instanceof StandardMaterial) {
+            m.material.emissiveColor = new Color3(0.25, 0.0, 0.35);
+          }
+          if (m instanceof Mesh) this.shadowGen?.addShadowCaster(m);
+        });
+        this.cloneRoot = root;
+        this.cloneMesh.setEnabled(false);
+      }
 
     } catch (e) {
-      // GLB indisponible — les capsules de fallback restent actives
       console.warn('[MirrorDuel] character.glb non chargé, fallback capsule actif.', e);
     }
   }
 
-  private applyEmissiveMaterial(meshes: AbstractMesh[], emissive: Color3, diffuse: Color3, alpha = 1.0): void {
-    meshes.forEach(m => {
-      if (!m.material) return;
-      const mat = new StandardMaterial(m.name + '_mat', this.scene);
-      mat.diffuseColor  = diffuse;
-      mat.emissiveColor = emissive;
-      mat.alpha = alpha;
-      m.material = mat;
-      if (m instanceof Mesh) this.glowLayer.addIncludedOnlyMesh(m);
-    });
-  }
 
   public async createScene(): Promise<void> {
     this.setupCamera();
     this.setupLighting();
     this.buildArena();
+    this.buildArenaDecor();      // R1 + R3 : dôme + piliers
     this.buildPlayerMesh();
     this.buildCloneMesh();
     this.buildHPOrbs();
+    this.buildScanEffect();       // O4
+    this.buildAmbientParticles(); // R5
+    this.buildCloneTrail();       // R5
     this.setupPostProcessing();
 
     this.heatmap      = new HeatmapRenderer(this.scene, ARENA_RADIUS);
@@ -210,7 +250,15 @@ export class MirrorDuelScene extends AbstractScene {
     this.echoAI.onMessage(advice => this.dialogueBox.showAdvice(advice));
 
     this.buildHUDOverlay();
+
+    this.escListener = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && this.phase === DuelPhase.DUEL) this.togglePause();
+      else if (e.key === 'Escape' && this.isPaused)            this.togglePause();
+    };
+    document.addEventListener('keydown', this.escListener);
+
     this.startPhase(DuelPhase.INTRO);
+    this.showIntroOverlay(); // R2
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -218,6 +266,8 @@ export class MirrorDuelScene extends AbstractScene {
   // ═══════════════════════════════════════════════════════════════════════════
 
   public update(deltaTime: number): void {
+    if (this.isPaused) return;
+
     this.phaseTimer          += deltaTime;
     this.hitCooldown          = Math.max(0, this.hitCooldown - deltaTime);
     this.nearMissCooldown     = Math.max(0, this.nearMissCooldown - deltaTime);
@@ -253,14 +303,11 @@ export class MirrorDuelScene extends AbstractScene {
     switch (phase) {
 
       case DuelPhase.INTRO:
-        setTimeout(() => this.echoAI.say(
-          "Bienvenue dans Mirror Duel. Je vais observer tes mouvements puis forger un clone numérique qui te traque. Trois rounds. Prépare-toi.",
-          AdviceType.TIP
-        ), 600);
-        setTimeout(() => this.startPhase(DuelPhase.OBSERVATION), 4500);
+        // L'overlay d'intro gère le démarrage — pas de setTimeout automatique
         break;
 
       case DuelPhase.OBSERVATION:
+        this.showScanEffect(); // O4
         this.heatmap.reset();
         this.inputRecorder.startRecording();
         this.clonePos.set(0, 0.5, -10);
@@ -273,6 +320,7 @@ export class MirrorDuelScene extends AbstractScene {
         break;
 
       case DuelPhase.TRANSITION: {
+        this.hideScanEffect(); // O4
         this.inputRecorder.stopRecording();
         const frames  = this.inputRecorder.getFrames();
         const stats   = this.inputRecorder.getStats(this.clonePos);
@@ -286,7 +334,7 @@ export class MirrorDuelScene extends AbstractScene {
           `${frames.length} mouvements analysés. Style : ${style}. Le clone est prêt — round ${this.currentRound}.`,
           AdviceType.OBSERVATION
         );
-        setTimeout(() => this.startPhase(DuelPhase.DUEL), 4000);
+        this.introTimers.push(setTimeout(() => this.startPhase(DuelPhase.DUEL), 4000));
         break;
       }
 
@@ -303,14 +351,17 @@ export class MirrorDuelScene extends AbstractScene {
         this.updateCloneVisualForRound();
         this.audioManager.playRoundStart(this.currentRound);
         this.audioManager.startAmbience();
-        this.echoAI.say(
-          this.currentRound === 1
-            ? "Duel ! Esquive ton clone aussi longtemps que possible !"
-            : this.currentRound === 2
-              ? "Round 2 — le clone se souvient de toi. Change de stratégie !"
-              : "Round 3 — MIROIR PARFAIT. Il te connaît mieux que toi-même.",
-          AdviceType.CHALLENGE
-        );
+        // J1 : countdown 3-2-1 avant de débloquer le gameplay
+        this.showDuelCountdown(() => {
+          this.echoAI.say(
+            this.currentRound === 1
+              ? "Duel ! Esquive ton clone aussi longtemps que possible !"
+              : this.currentRound === 2
+                ? "Round 2 — le clone se souvient de toi. Change de stratégie !"
+                : "Round 3 — MIROIR PARFAIT. Il te connaît mieux que toi-même.",
+            AdviceType.CHALLENGE,
+          );
+        });
         break;
 
       case DuelPhase.ANALYSIS:
@@ -360,6 +411,8 @@ export class MirrorDuelScene extends AbstractScene {
 
   // ─── Duel ─────────────────────────────────────────────────────────────────
   private updateDuel(deltaTime: number): void {
+    if (this.duelFrozen) return; // J1 : bloqué pendant le countdown
+
     const cfg = ROUND_CONFIGS[this.currentRound - 1];
 
     this.movePlayer(deltaTime);
@@ -421,8 +474,12 @@ export class MirrorDuelScene extends AbstractScene {
       this.hideRoundAnalysisScreen();
       this.currentRound++;
       this.heatmap.fadeRound();
-      this.inputRecorder.startRecording(); // repart pour le round suivant
-      this.startPhase(DuelPhase.OBSERVATION);
+      this.inputRecorder.startRecording();
+      // O2 : flash du label du nouveau round
+      const cfg = ROUND_CONFIGS[this.currentRound - 1];
+      this.showPhaseFlash(`ROUND ${this.currentRound} — ${cfg.label}`, '#cc66ff', 1400, () => {
+        this.startPhase(DuelPhase.OBSERVATION);
+      });
     }
   }
 
@@ -528,6 +585,7 @@ export class MirrorDuelScene extends AbstractScene {
     this.spawnHitParticles(this.playerPos.clone());
     this.triggerHitPostProcess();
     this.audioManager.playHit();
+    this.showScorePopup('-5', '#ff4444'); // J3
 
     const mode = this.cloneCurrentMode;
     if (mode === CloneMode.PREDICT || mode === CloneMode.INTERCEPT) {
@@ -547,6 +605,7 @@ export class MirrorDuelScene extends AbstractScene {
     this.nearMissCooldown = 3.0;
     this.score += 3;
     this.audioManager.playNearMiss();
+    this.showScorePopup('+3', '#00ff7f'); // J3
     if (!this.hasNearMissed) {
       this.hasNearMissed = true;
       this.echoAI.say("Belle esquive ! Mon clone retient ce mouvement...", AdviceType.OBSERVATION);
@@ -712,6 +771,66 @@ export class MirrorDuelScene extends AbstractScene {
         }
       });
     }
+
+    // Changer la couleur de la lumière clone selon le round
+    if (this.cloneFollowLight) {
+      this.cloneFollowLight.diffuse    = e;
+      this.cloneFollowLight.intensity  = 1.2 + (this.currentRound - 1) * 0.4;
+    }
+    this.updateCloneAura(e); // O1
+  }
+
+  private updateCloneAura(color: Color3): void {
+    // Round 2+ : anneau orbitant supplémentaire
+    if (this.currentRound >= 2 && !this.cloneAuraRing2) {
+      this.cloneAuraRing2 = MeshBuilder.CreateTorus('cloneAura2', {
+        diameter: 2.2, thickness: 0.07, tessellation: 48,
+      }, this.scene);
+      const m2 = new StandardMaterial('cloneAura2Mat', this.scene);
+      m2.emissiveColor = color;
+      this.cloneAuraRing2.material = m2;
+      this.glowLayer.addIncludedOnlyMesh(this.cloneAuraRing2);
+    } else if (this.cloneAuraRing2) {
+      (this.cloneAuraRing2.material as StandardMaterial).emissiveColor = color;
+    }
+
+    // Round 3 : second anneau + particules de feu
+    if (this.currentRound === 3) {
+      if (!this.cloneAuraRing3) {
+        this.cloneAuraRing3 = MeshBuilder.CreateTorus('cloneAura3', {
+          diameter: 2.8, thickness: 0.05, tessellation: 64,
+        }, this.scene);
+        const m3 = new StandardMaterial('cloneAura3Mat', this.scene);
+        m3.emissiveColor = new Color3(1.0, 0.55, 0.0);
+        this.cloneAuraRing3.material = m3;
+        this.glowLayer.addIncludedOnlyMesh(this.cloneAuraRing3);
+      }
+      if (!this.cloneAuraPs) {
+        this.cloneAuraPsTex = new DynamicTexture('cloneAuraTex', { width: 16, height: 16 }, this.scene, false);
+        const ctx = this.cloneAuraPsTex.getContext();
+        const g   = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+        g.addColorStop(0, 'rgba(255,150,0,1)'); g.addColorStop(1, 'rgba(255,80,0,0)');
+        ctx.fillStyle = g; ctx.fillRect(0, 0, 16, 16);
+        this.cloneAuraPsTex.update();
+
+        this.cloneAuraPs = new ParticleSystem('cloneAura', 35, this.scene);
+        this.cloneAuraPs.emitter         = this.clonePos.clone();
+        this.cloneAuraPs.particleTexture = this.cloneAuraPsTex;
+        this.cloneAuraPs.minEmitBox      = new Vector3(-0.3, 0, -0.3);
+        this.cloneAuraPs.maxEmitBox      = new Vector3( 0.3, 0.8, 0.3);
+        this.cloneAuraPs.color1          = new Color4(1.0, 0.5, 0.0, 0.7);
+        this.cloneAuraPs.color2          = new Color4(1.0, 0.2, 0.0, 0.4);
+        this.cloneAuraPs.colorDead       = new Color4(0.5, 0.0, 0.0, 0.0);
+        this.cloneAuraPs.minSize         = 0.06; this.cloneAuraPs.maxSize      = 0.2;
+        this.cloneAuraPs.minLifeTime     = 0.2;  this.cloneAuraPs.maxLifeTime  = 0.6;
+        this.cloneAuraPs.emitRate        = 30;
+        this.cloneAuraPs.direction1      = new Vector3(-0.5, 2, -0.5);
+        this.cloneAuraPs.direction2      = new Vector3( 0.5, 4,  0.5);
+        this.cloneAuraPs.minEmitPower    = 0.5; this.cloneAuraPs.maxEmitPower = 1.5;
+        this.cloneAuraPs.gravity         = new Vector3(0, -1, 0);
+        this.cloneAuraPs.start();
+      }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -740,6 +859,30 @@ export class MirrorDuelScene extends AbstractScene {
         this.cloneRoot.rotation.y = Math.atan2(this.cloneVelocity.x, this.cloneVelocity.z);
     }
 
+    // Sync lumières personnages
+    if (this.playerFollowLight) this.playerFollowLight.position.set(this.playerPos.x, this.playerPos.y + 1.5, this.playerPos.z);
+    if (this.cloneFollowLight)  this.cloneFollowLight.position.set(this.clonePos.x,   this.clonePos.y + 1.5,  this.clonePos.z);
+
+    // Sync trail clone (R5)
+    if (this.cloneTrailPs) {
+      (this.cloneTrailPs.emitter as Vector3).copyFrom(this.clonePos);
+    }
+
+    // Sync aura rings (O1)
+    const t = performance.now() / 1000;
+    if (this.cloneAuraRing2) {
+      this.cloneAuraRing2.position.copyFrom(this.clonePos);
+      this.cloneAuraRing2.rotation.x += 0.025;
+      this.cloneAuraRing2.rotation.z += 0.018;
+    }
+    if (this.cloneAuraRing3) {
+      this.cloneAuraRing3.position.copyFrom(this.clonePos);
+      this.cloneAuraRing3.rotation.z = t * 0.8;
+    }
+    if (this.cloneAuraPs) {
+      (this.cloneAuraPs.emitter as Vector3).copyFrom(this.clonePos);
+    }
+
     this.syncHPOrbs();
 
     if (this.phase === DuelPhase.DUEL) {
@@ -764,70 +907,360 @@ export class MirrorDuelScene extends AbstractScene {
   // ═══════════════════════════════════════════════════════════════════════════
 
   private setupCamera(): void {
-    this.camera = new ArcRotateCamera('duelCamera', -Math.PI / 2, Math.PI / 3.2, 36, Vector3.Zero(), this.scene);
+    // Beta PI/3.8 ≈ 47° depuis le haut — on voit les murs et les personnages
+    this.camera = new ArcRotateCamera('duelCamera', -Math.PI / 2, Math.PI / 3.8, 34, new Vector3(0, 1, 0), this.scene);
     this.camera.minZ = 0.1; this.camera.maxZ = 500;
-    this.camera.lowerRadiusLimit = 36; this.camera.upperRadiusLimit = 36;
-    this.camera.lowerBetaLimit   = Math.PI / 3.2;
-    this.camera.upperBetaLimit   = Math.PI / 3.2;
+    this.camera.lowerRadiusLimit = 34; this.camera.upperRadiusLimit = 34;
+    this.camera.lowerBetaLimit   = Math.PI / 3.8;
+    this.camera.upperBetaLimit   = Math.PI / 3.8;
   }
 
   private setupLighting(): void {
-    const ambient     = new HemisphericLight('duelAmbient', new Vector3(0, 1, 0), this.scene);
-    ambient.intensity = 0.3;
-    ambient.diffuse   = new Color3(0.4, 0.2, 0.6);
-    ambient.groundColor = new Color3(0.1, 0.05, 0.15);
+    // Lumière ambiante douce
+    const ambient       = new HemisphericLight('duelAmbient', new Vector3(0, 1, 0), this.scene);
+    ambient.intensity   = 0.55;
+    ambient.diffuse     = new Color3(0.7, 0.65, 0.9);
+    ambient.groundColor = new Color3(0.1, 0.08, 0.18);
 
-    const center      = new PointLight('duelCenter', new Vector3(0, 8, 0), this.scene);
-    center.diffuse    = new Color3(0.6, 0.2, 1.0);
-    center.intensity  = 1.2; center.range = 40;
+    // Lumière directionnelle principale + ombres
+    const sun       = new DirectionalLight('duelSun', new Vector3(-0.4, -1, 0.3), this.scene);
+    sun.position    = new Vector3(0, 20, 0);
+    sun.diffuse     = new Color3(0.9, 0.85, 1.0);
+    sun.intensity   = 0.9;
 
-    const playerL     = new PointLight('duelPlayer', new Vector3(0, 3, 12), this.scene);
-    playerL.diffuse   = new Color3(0.2, 0.8, 1.0);
-    playerL.intensity = 0.6; playerL.range = 20;
+    this.shadowGen = new ShadowGenerator(1024, sun);
+    this.shadowGen.useBlurExponentialShadowMap = true;
+    this.shadowGen.blurScale   = 2;
+    this.shadowGen.setDarkness(0.4);
 
-    const cloneL      = new PointLight('duelClone', new Vector3(0, 3, -12), this.scene);
-    cloneL.diffuse    = new Color3(1.0, 0.2, 0.8);
-    cloneL.intensity  = 0.6; cloneL.range = 20;
+    // Lumière centrale au plafond
+    const center      = new PointLight('duelCenter', new Vector3(0, 7, 0), this.scene);
+    center.diffuse    = new Color3(0.7, 0.5, 1.0);
+    center.intensity  = 0.8; center.range = 32;
+
+    // Lumière suivant le joueur (bleue)
+    this.playerFollowLight = new PointLight('playerFL', this.playerPos.clone(), this.scene);
+    this.playerFollowLight.diffuse    = new Color3(0.2, 0.7, 1.0);
+    this.playerFollowLight.intensity  = 1.4;
+    this.playerFollowLight.range      = 8;
+
+    // Lumière suivant le clone (violette)
+    this.cloneFollowLight = new PointLight('cloneFL', this.clonePos.clone(), this.scene);
+    this.cloneFollowLight.diffuse    = new Color3(0.9, 0.2, 1.0);
+    this.cloneFollowLight.intensity  = 1.2;
+    this.cloneFollowLight.range      = 8;
   }
 
   private buildArena(): void {
-    this.arenaFloor = MeshBuilder.CreateDisc('arenaFloor', { radius: ARENA_RADIUS, tessellation: 64 }, this.scene);
+    const WALL_H = 8;
+    const T = '/textures/walls/MetalPlates017B_1K-PNG_';
+    const TF = '/textures/floor/tiles/Tiles076_1K-PNG_';
+
+    // ── Sol PBR texturé ───────────────────────────────────────────────────
+    this.arenaFloor = MeshBuilder.CreateDisc('arenaFloor', { radius: ARENA_RADIUS, tessellation: 80 }, this.scene);
     this.arenaFloor.rotation.x = Math.PI / 2;
     this.arenaFloor.position.y = 0;
+    this.arenaFloor.receiveShadows = true;
+
     const floorMat = new PBRMaterial('arenaFloorMat', this.scene);
-    floorMat.albedoColor = new Color3(0.03, 0.02, 0.06);
-    floorMat.metallic = 0.1; floorMat.roughness = 0.9;
+    floorMat.metallic  = 0.15;
+    floorMat.roughness = 0.8;
+    floorMat.albedoColor = new Color3(0.18, 0.14, 0.22);
+    try {
+      const fc = new Texture(`${TF}Color.png`, this.scene); fc.uScale = 6; fc.vScale = 6;
+      const fn = new Texture(`${TF}NormalGL.png`, this.scene); fn.uScale = 6; fn.vScale = 6;
+      floorMat.albedoTexture = fc;
+      floorMat.bumpTexture   = fn;
+    } catch { /* textures optionnelles */ }
     this.arenaFloor.material = floorMat;
 
-    this.boundaryRing = MeshBuilder.CreateTorus('arenaRing', { diameter: ARENA_RADIUS * 2, thickness: 0.3, tessellation: 96 }, this.scene);
-    this.boundaryRing.position.y = 0.15;
+    // ── Mur circulaire (face intérieure) — texture MetalPlates ────────────
+    const wall = MeshBuilder.CreateCylinder('arenaWall', {
+      height:      WALL_H,
+      diameter:    ARENA_RADIUS * 2,
+      tessellation: 64,
+      sideOrientation: Mesh.BACKSIDE,
+    }, this.scene);
+    wall.position.y = WALL_H / 2;
+    wall.receiveShadows = true;
+
+    const wallMat = new PBRMaterial('arenaWallMat', this.scene);
+    wallMat.metallic  = 0.85;
+    wallMat.roughness = 0.3;
+    wallMat.albedoColor = new Color3(0.12, 0.10, 0.16);
+    try {
+      const wc = new Texture(`${T}Color.png`, this.scene); wc.uScale = 8; wc.vScale = 2;
+      const wn = new Texture(`${T}NormalGL.png`, this.scene); wn.uScale = 8; wn.vScale = 2;
+      const wa = new Texture(`${T}AmbientOcclusion.png`, this.scene); wa.uScale = 8; wa.vScale = 2;
+      wallMat.albedoTexture          = wc;
+      wallMat.bumpTexture            = wn;
+      wallMat.ambientTexture         = wa;
+    } catch { /* textures optionnelles */ }
+    wall.material = wallMat;
+    this.wallMeshes.push(wall);
+    this.shadowGen?.addShadowCaster(wall);
+
+    // ── Plafond PBR sombre ─────────────────────────────────────────────────
+    const ceiling = MeshBuilder.CreateDisc('arenaCeiling', { radius: ARENA_RADIUS, tessellation: 64 }, this.scene);
+    ceiling.rotation.x  = -Math.PI / 2;
+    ceiling.position.y  = WALL_H;
+    const ceilMat = new PBRMaterial('arenaCeilMat', this.scene);
+    ceilMat.albedoColor = new Color3(0.06, 0.04, 0.10);
+    ceilMat.metallic    = 0.6; ceilMat.roughness = 0.5;
+    ceiling.material = ceilMat;
+    this.wallMeshes.push(ceiling);
+
+    // Panneaux lumineux au plafond
+    for (let i = 0; i < 4; i++) {
+      const angle = (i / 4) * Math.PI * 2;
+      const px = Math.cos(angle) * 5;
+      const pz = Math.sin(angle) * 5;
+      const panel = MeshBuilder.CreateBox(`ceilPanel_${i}`, { width: 3, height: 0.06, depth: 1 }, this.scene);
+      panel.position.set(px, WALL_H - 0.05, pz);
+      panel.rotation.y = angle;
+      const pm = new StandardMaterial(`ceilPanelMat_${i}`, this.scene);
+      pm.emissiveColor = new Color3(0.5, 0.4, 0.7);
+      panel.material = pm;
+      this.glowLayer.addIncludedOnlyMesh(panel);
+      this.wallMeshes.push(panel);
+    }
+
+    // ── Anneau de base lumineux (indicateur de zone) ───────────────────────
+    this.boundaryRing = MeshBuilder.CreateTorus('arenaRing', {
+      diameter: ARENA_RADIUS * 2, thickness: 0.28, tessellation: 96,
+    }, this.scene);
+    this.boundaryRing.position.y = 0.14;
     const ringMat = new StandardMaterial('arenaRingMat', this.scene);
     ringMat.emissiveColor = new Color3(0.7, 0.2, 1.0);
     this.boundaryRing.material = ringMat;
     this.glowLayer.addIncludedOnlyMesh(this.boundaryRing);
 
-    for (let r = 4; r < ARENA_RADIUS; r += 4) {
-      const circle = MeshBuilder.CreateTorus(`grid_${r}`, { diameter: r * 2, thickness: 0.05, tessellation: 64 }, this.scene);
-      circle.position.y = 0.01;
-      const cm = new StandardMaterial(`gridMat_${r}`, this.scene);
-      cm.emissiveColor = new Color3(0.15, 0.05, 0.3); cm.alpha = 0.6;
-      circle.material = cm;
-    }
-
-    const divider = MeshBuilder.CreateBox('divider', { width: 0.08, height: 0.05, depth: ARENA_RADIUS * 2 }, this.scene);
-    divider.position.y = 0.02;
+    // Ligne de séparation centrale (joueur vs clone)
+    const divider = MeshBuilder.CreateBox('divider', { width: 0.06, height: 0.05, depth: ARENA_RADIUS * 2 }, this.scene);
+    divider.position.y = 0.025;
     const divMat = new StandardMaterial('dividerMat', this.scene);
-    divMat.emissiveColor = new Color3(0.4, 0.1, 0.7); divMat.alpha = 0.5;
+    divMat.emissiveColor = new Color3(0.5, 0.15, 0.85); divMat.alpha = 0.55;
     divider.material = divMat;
     this.glowLayer.addIncludedOnlyMesh(divider);
 
+    // Marqueurs de spawn
     this.buildSpawnMarker(new Vector3(0, 0.02, 10),  new Color3(0.2, 0.8, 1.0));
     this.buildSpawnMarker(new Vector3(0, 0.02, -10), new Color3(1.0, 0.2, 0.8));
 
-    this.scene.registerBeforeRender(() => {
+    // Animation ring couleur
+    this.arenaAnimObs = this.scene.onBeforeRenderObservable.add(() => {
       const t = performance.now() / 1000;
-      ringMat.emissiveColor = new Color3(0.5 + 0.2 * Math.sin(t * 0.5), 0.1, 0.8 + 0.2 * Math.cos(t * 0.5));
+      ringMat.emissiveColor = new Color3(
+        0.5 + 0.2 * Math.sin(t * 0.5), 0.1,
+        0.8 + 0.2 * Math.cos(t * 0.5),
+      );
     });
+  }
+
+  // ─── Scan visuel observation (O4) ─────────────────────────────────────────
+
+  private buildScanEffect(): void {
+    // Bande scan longue et fine qui tourne autour de l'axe Y
+    this.scanBeam = MeshBuilder.CreateBox('scanBeam', {
+      width: ARENA_RADIUS - 0.5, height: 0.025, depth: 0.18,
+    }, this.scene);
+    this.scanBeam.position.x = (ARENA_RADIUS - 0.5) / 2;
+    this.scanBeam.position.y = 0.04;
+    const bm = new StandardMaterial('scanBeamMat', this.scene);
+    bm.emissiveColor = new Color3(0.3, 0.9, 1.0);
+    bm.alpha = 0.75;
+    this.scanBeam.material = bm;
+    this.glowLayer.addIncludedOnlyMesh(this.scanBeam);
+
+    // Disque semi-transparent
+    this.scanRoot = MeshBuilder.CreateDisc('scanDisc', {
+      radius: ARENA_RADIUS - 0.5, tessellation: 64,
+    }, this.scene);
+    this.scanRoot.rotation.x = -Math.PI / 2;
+    this.scanRoot.position.y = 0.02;
+    const dm = new StandardMaterial('scanDiscMat', this.scene);
+    dm.emissiveColor = new Color3(0.12, 0.5, 0.6);
+    dm.alpha = 0.06;
+    dm.backFaceCulling = false;
+    this.scanRoot.material = dm;
+
+    this.scanBeam.setEnabled(false);
+    this.scanRoot.setEnabled(false);
+  }
+
+  private showScanEffect(): void {
+    if (!this.scanBeam || !this.scanRoot) return;
+    this.scanBeam.setEnabled(true);
+    this.scanRoot.setEnabled(true);
+    this.scanObs = this.scene.onBeforeRenderObservable.add(() => {
+      if (!this.scanBeam) return;
+      const cfg      = ROUND_CONFIGS[this.currentRound - 1];
+      const progress = Math.min(1, this.phaseTimer / cfg.observeTime);
+      const angle    = progress * Math.PI * 2 * 1.5;
+      this.scanBeam.rotation.y = angle;
+      this.scanRoot!.rotation.y = angle;
+    });
+  }
+
+  private hideScanEffect(): void {
+    this.scanBeam?.setEnabled(false);
+    this.scanRoot?.setEnabled(false);
+    if (this.scanObs) {
+      this.scene.onBeforeRenderObservable.remove(this.scanObs);
+      this.scanObs = null;
+    }
+  }
+
+  // ─── Particules ambiantes (R5) ────────────────────────────────────────────
+
+  private buildAmbientParticles(): void {
+    this.ambientPsTex = new DynamicTexture('ambientTex', { width: 16, height: 16 }, this.scene, false);
+    const ctx = this.ambientPsTex.getContext();
+    const g   = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+    g.addColorStop(0, 'rgba(180,80,255,1)'); g.addColorStop(1, 'rgba(100,0,200,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 16, 16);
+    this.ambientPsTex.update();
+
+    this.ambientPs = new ParticleSystem('arenaAmbient', 120, this.scene);
+    this.ambientPs.emitter      = new Vector3(0, 1, 0);
+    this.ambientPs.minEmitBox   = new Vector3(-ARENA_RADIUS, 0, -ARENA_RADIUS);
+    this.ambientPs.maxEmitBox   = new Vector3( ARENA_RADIUS, 0,  ARENA_RADIUS);
+    this.ambientPs.particleTexture = this.ambientPsTex;
+    this.ambientPs.color1       = new Color4(0.6, 0.2, 1.0, 0.20);
+    this.ambientPs.color2       = new Color4(0.8, 0.4, 1.0, 0.12);
+    this.ambientPs.colorDead    = new Color4(0.3, 0.0, 0.5, 0.0);
+    this.ambientPs.minSize      = 0.04; this.ambientPs.maxSize      = 0.14;
+    this.ambientPs.minLifeTime  = 3.5;  this.ambientPs.maxLifeTime  = 6.5;
+    this.ambientPs.emitRate     = 18;
+    this.ambientPs.direction1   = new Vector3(-0.1, 0.6, -0.1);
+    this.ambientPs.direction2   = new Vector3( 0.1, 1.5,  0.1);
+    this.ambientPs.minEmitPower = 0.05; this.ambientPs.maxEmitPower = 0.18;
+    this.ambientPs.gravity      = new Vector3(0, 0, 0);
+    this.ambientPs.start();
+  }
+
+  private buildCloneTrail(): void {
+    this.cloneTrailTex = new DynamicTexture('cloneTrailTex', { width: 16, height: 16 }, this.scene, false);
+    const ctx = this.cloneTrailTex.getContext();
+    const g   = ctx.createRadialGradient(8, 8, 0, 8, 8, 8);
+    g.addColorStop(0, 'rgba(200,50,255,1)'); g.addColorStop(1, 'rgba(150,0,200,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 16, 16);
+    this.cloneTrailTex.update();
+
+    this.cloneTrailPs = new ParticleSystem('cloneTrail', 30, this.scene);
+    this.cloneTrailPs.emitter         = this.clonePos.clone();
+    this.cloneTrailPs.particleTexture = this.cloneTrailTex;
+    this.cloneTrailPs.minEmitBox      = new Vector3(-0.1, 0, -0.1);
+    this.cloneTrailPs.maxEmitBox      = new Vector3( 0.1, 0.5, 0.1);
+    this.cloneTrailPs.color1          = new Color4(0.9, 0.2, 1.0, 0.65);
+    this.cloneTrailPs.color2          = new Color4(0.6, 0.0, 0.8, 0.35);
+    this.cloneTrailPs.colorDead       = new Color4(0.3, 0.0, 0.4, 0.0);
+    this.cloneTrailPs.minSize         = 0.05; this.cloneTrailPs.maxSize      = 0.18;
+    this.cloneTrailPs.minLifeTime     = 0.2;  this.cloneTrailPs.maxLifeTime  = 0.5;
+    this.cloneTrailPs.emitRate        = 22;
+    this.cloneTrailPs.direction1      = new Vector3(-0.2, 0.5, -0.2);
+    this.cloneTrailPs.direction2      = new Vector3( 0.2, 1.0,  0.2);
+    this.cloneTrailPs.minEmitPower    = 0.1; this.cloneTrailPs.maxEmitPower = 0.35;
+    this.cloneTrailPs.gravity         = new Vector3(0, -0.5, 0);
+    this.cloneTrailPs.start();
+  }
+
+  // ─── Décor 3D — dôme + piliers (R1 + R3) ─────────────────────────────────
+
+  private buildArenaDecor(): void {
+    this.buildArenaDome();
+    this.buildArenaPillars();
+  }
+
+  private buildArenaDome(): void {
+    this.arenaDome = MeshBuilder.CreateSphere('arenaDome', {
+      diameter: 72,
+      segments: 14,
+      sideOrientation: Mesh.BACKSIDE,
+    }, this.scene);
+    this.arenaDome.position.y = 8;
+
+    const mat = new StandardMaterial('arenaDomeMat', this.scene);
+    mat.emissiveColor   = new Color3(0.04, 0.01, 0.10);
+    mat.diffuseColor    = new Color3(0.02, 0.01, 0.05);
+    mat.backFaceCulling = false;
+    this.arenaDome.material = mat;
+
+    // Anneaux horizontaux sur le dôme — effet grille néon
+    const levels = [4, 12, 20, 28];
+    for (const yOff of levels) {
+      const y      = yOff;
+      const halfH  = 36;  // rayon de la sphère
+      const rSq    = halfH * halfH - (y - 8) * (y - 8);
+      if (rSq <= 0) continue;
+      const r = Math.sqrt(rSq);
+      const ring = MeshBuilder.CreateTorus(`domeRing_${y}`, {
+        diameter: r * 2, thickness: 0.12, tessellation: 80,
+      }, this.scene);
+      ring.position.y = y;
+      const rm = new StandardMaterial(`domeRingMat_${y}`, this.scene);
+      rm.emissiveColor = new Color3(0.10, 0.03, 0.25);
+      rm.alpha = 0.40;
+      ring.material = rm;
+      this.decalMeshes.push(ring);
+    }
+  }
+
+  private buildArenaPillars(): void {
+    const count  = 8;
+    const radius = ARENA_RADIUS + 2.5;
+    const colors = [
+      new Color3(0.2, 0.8, 1.0),
+      new Color3(1.0, 0.2, 0.8),
+      new Color3(0.5, 0.1, 1.0),
+      new Color3(0.2, 1.0, 0.7),
+    ];
+
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2;
+      const x     = Math.cos(angle) * radius;
+      const z     = Math.sin(angle) * radius;
+      const color = colors[i % colors.length];
+
+      // Corps pilier
+      const pillar = MeshBuilder.CreateCylinder(`pillar_${i}`, {
+        height: 9, diameterTop: 0.28, diameterBottom: 0.46, tessellation: 12,
+      }, this.scene);
+      pillar.position.set(x, 4.5, z);
+      const pm = new PBRMaterial(`pillarMat_${i}`, this.scene);
+      pm.albedoColor = new Color3(0.06, 0.04, 0.10);
+      pm.metallic    = 0.85;
+      pm.roughness   = 0.2;
+      pillar.material = pm;
+      this.pillarMeshes.push(pillar);
+
+      // Bande lumineuse centrale
+      const band = MeshBuilder.CreateCylinder(`pillarBand_${i}`, {
+        height: 0.15, diameter: 0.50, tessellation: 12,
+      }, this.scene);
+      band.position.set(x, 4.5, z);
+      const bm = new StandardMaterial(`bandMat_${i}`, this.scene);
+      bm.emissiveColor = color;
+      band.material = bm;
+      this.glowLayer.addIncludedOnlyMesh(band);
+      this.pillarMeshes.push(band);
+
+      // Orbe au sommet
+      const orb = MeshBuilder.CreateSphere(`pillarOrb_${i}`, { diameter: 0.5, segments: 8 }, this.scene);
+      orb.position.set(x, 9.3, z);
+      const om = new StandardMaterial(`orbMat_${i}`, this.scene);
+      om.emissiveColor = color;
+      orb.material = om;
+      this.glowLayer.addIncludedOnlyMesh(orb);
+      this.pillarMeshes.push(orb);
+
+      // Lumière de l'orbe
+      const light = new PointLight(`pillarLight_${i}`, new Vector3(x, 9.3, z), this.scene);
+      light.diffuse   = color;
+      light.intensity = 0.55;
+      light.range     = 10;
+      this.pillarLights.push(light);
+    }
   }
 
   private buildSpawnMarker(pos: Vector3, color: Color3): void {
@@ -1178,14 +1611,31 @@ export class MirrorDuelScene extends AbstractScene {
       <div style="margin-top:12px;color:#aaa">Profil ECHO : <em style="color:#ffcc66">${style}</em></div>
       ${sessions > 1 ? `<div style="color:#888;font-size:12px;margin-top:4px">Session n°${this.gameState.totalSessions} — Clone niveau ${cloneLevel}.</div>` : ''}
     `;
+    // Boutons cliquables (O3)
+    const btnRow = document.createElement('div');
+    Object.assign(btnRow.style, {
+      display: 'flex', gap: '16px', justifyContent: 'center',
+      marginTop: '24px', pointerEvents: 'all',
+    });
+    const replayBtn = this.makePauseBtn('REJOUER',        '#cc66ff', () => this.restartGame());
+    const hubBtn    = this.makePauseBtn('RETOUR AU HUB',  '#ff6666', () => this.returnToHub());
+    btnRow.appendChild(replayBtn); btnRow.appendChild(hubBtn);
+    body.appendChild(btnRow);
+
+    const hint = document.createElement('div');
+    Object.assign(hint.style, { marginTop: '10px', fontSize: '10px',
+      color: 'rgba(255,255,255,0.22)', letterSpacing: '2px' });
+    hint.textContent = '[R] REJOUER  |  [ÉCHAP] RETOUR HUB';
+    body.appendChild(hint);
+
     overlay.style.display = 'block';
 
     if (survived) {
       this.audioManager.playVictory();
-      setTimeout(() => this.echoAI.say(`Impressionnant. Tu as survécu les 3 rounds. Score : ${totalScore}. Mon clone passe au niveau ${this.gameState.cloneLevel}.`, AdviceType.ENCOURAGEMENT), 500);
+      this.introTimers.push(setTimeout(() => this.echoAI.say(`Impressionnant. Tu as survécu les 3 rounds. Score : ${totalScore}. Mon clone passe au niveau ${this.gameState.cloneLevel}.`, AdviceType.ENCOURAGEMENT), 500));
     } else {
       this.audioManager.playDefeat();
-      setTimeout(() => this.echoAI.say(`Duel terminé. Score : ${totalScore}. Mon clone atteint ${accuracy}% de précision. Je me souviens de toi.`, AdviceType.OBSERVATION), 500);
+      this.introTimers.push(setTimeout(() => this.echoAI.say(`Duel terminé. Score : ${totalScore}. Mon clone atteint ${accuracy}% de précision. Je me souviens de toi.`, AdviceType.OBSERVATION), 500));
     }
   }
 
@@ -1195,10 +1645,288 @@ export class MirrorDuelScene extends AbstractScene {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  //  COUNTDOWN 3-2-1 (J1)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private duelFrozen: boolean = false;
+
+  private showDuelCountdown(callback: () => void): void {
+    this.duelFrozen = true;
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      position: 'fixed', top: '50%', left: '50%',
+      transform: 'translate(-50%,-50%)',
+      fontSize: '8rem', fontWeight: 'bold',
+      fontFamily: '"Courier New", monospace',
+      color: '#fff', textShadow: '0 0 40px #cc66ff',
+      pointerEvents: 'none', zIndex: '40',
+      opacity: '0', transition: 'opacity 0.15s, transform 0.15s',
+    });
+    document.body.appendChild(el);
+
+    const counts  = ['3', '2', '1', 'DUEL !'];
+    const colors  = ['#cc66ff', '#cc66ff', '#cc66ff', '#00ff7f'];
+    let i = 0;
+    const next = () => {
+      el.textContent = counts[i];
+      el.style.color      = colors[i];
+      el.style.textShadow = `0 0 40px ${colors[i]}`;
+      el.style.opacity    = '1';
+      el.style.transform  = 'translate(-50%,-50%) scale(1)';
+      this.introTimers.push(setTimeout(() => {
+        el.style.opacity   = '0';
+        el.style.transform = 'translate(-50%,-50%) scale(1.35)';
+        i++;
+        if (i < counts.length) {
+          this.introTimers.push(setTimeout(next, 180));
+        } else {
+          this.introTimers.push(setTimeout(() => {
+            el.remove();
+            this.duelFrozen = false;
+            callback();
+          }, 180));
+        }
+      }, 700));
+    };
+    this.introTimers.push(setTimeout(next, 80));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  SCORE POPUP (J3)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private showScorePopup(text: string, color: string): void {
+    const el = document.createElement('div');
+    el.textContent = text;
+    Object.assign(el.style, {
+      position: 'fixed', top: '38%', left: '50%',
+      transform: 'translateX(-50%)',
+      fontSize: '2rem', fontWeight: 'bold',
+      fontFamily: '"Courier New", monospace',
+      color, textShadow: `0 0 16px ${color}`,
+      pointerEvents: 'none', zIndex: '35',
+      opacity: '1', transition: 'opacity 0.5s, top 0.5s',
+    });
+    document.body.appendChild(el);
+    requestAnimationFrame(() => {
+      el.style.top     = '32%';
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 520);
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  FLASH DE PHASE (O2)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private showPhaseFlash(label: string, color: string, duration = 1400, callback?: () => void): void {
+    const flash = document.createElement('div');
+    Object.assign(flash.style, {
+      position: 'fixed', inset: '0',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'rgba(5,0,18,0.88)',
+      zIndex: '40', opacity: '0', transition: 'opacity 0.28s',
+      fontFamily: '"Courier New", monospace', pointerEvents: 'none',
+    });
+    const text = document.createElement('div');
+    text.textContent = label;
+    Object.assign(text.style, {
+      color, fontSize: '2.6rem', letterSpacing: '0.22em',
+      textShadow: `0 0 40px ${color}`, fontWeight: 'bold',
+    });
+    flash.appendChild(text);
+    document.body.appendChild(flash);
+    requestAnimationFrame(() => {
+      flash.style.opacity = '1';
+      this.introTimers.push(setTimeout(() => {
+        flash.style.opacity = '0';
+        this.introTimers.push(setTimeout(() => { flash.remove(); callback?.(); }, 300));
+      }, duration));
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  PAUSE (O3)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private togglePause(): void {
+    this.isPaused = !this.isPaused;
+    if (this.isPaused) {
+      this.audioManager.stopAmbience();
+      this.showPauseOverlay();
+    } else {
+      if (this.phase === DuelPhase.DUEL) this.audioManager.startAmbience();
+      this.pauseOverlay?.remove();
+      this.pauseOverlay = null;
+    }
+  }
+
+  private showPauseOverlay(): void {
+    const ov = document.createElement('div');
+    Object.assign(ov.style, {
+      position: 'fixed', inset: '0',
+      background: 'rgba(4,2,12,0.88)',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      zIndex: '45', fontFamily: '"Courier New", monospace',
+      gap: '14px', pointerEvents: 'all',
+    });
+    const title = document.createElement('h2');
+    title.textContent = '— PAUSE —';
+    Object.assign(title.style, { color: '#cc66ff', fontSize: '1.6rem', letterSpacing: '0.3em', margin: '0 0 20px' });
+    const resume = this.makePauseBtn('REPRENDRE', '#cc66ff', () => this.togglePause());
+    const hub    = this.makePauseBtn('RETOUR AU HUB', '#ff6666', async () => {
+      ov.remove();
+      await SceneManager.getInstance().loadScene('HubScene');
+    });
+    const hint = document.createElement('p');
+    hint.textContent = 'ESC pour reprendre';
+    Object.assign(hint.style, { color: '#442255', fontSize: '0.8rem', margin: '8px 0 0' });
+    ov.appendChild(title); ov.appendChild(resume); ov.appendChild(hub); ov.appendChild(hint);
+    document.body.appendChild(ov);
+    this.pauseOverlay = ov;
+  }
+
+  private makePauseBtn(label: string, color: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.textContent = label;
+    Object.assign(btn.style, {
+      background: 'transparent', border: `2px solid ${color}`,
+      color, fontSize: '0.95rem', letterSpacing: '0.15em',
+      padding: '10px 36px', cursor: 'pointer',
+      pointerEvents: 'all', minWidth: '220px', transition: 'background 0.2s, color 0.2s',
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.background = color; btn.style.color = '#000'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; btn.style.color = color; });
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  INTRO OVERLAY (R2)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private showIntroOverlay(): void {
+    const ov = document.createElement('div');
+    Object.assign(ov.style, {
+      position: 'fixed', inset: '0',
+      background: 'rgba(4,2,12,0.96)',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      zIndex: '50', fontFamily: '"Courier New", monospace', color: '#cc66ff',
+    });
+
+    const title = document.createElement('h1');
+    title.textContent = 'MIRROR DUEL';
+    Object.assign(title.style, {
+      fontSize: '3.2rem', letterSpacing: '0.3em',
+      color: '#cc66ff', textShadow: '0 0 35px #9900ff, 0 0 70px #6600cc55',
+      margin: '0 0 8px',
+    });
+
+    const sub = document.createElement('p');
+    sub.textContent = "Combat contre ton Clone IA — il apprend, il s'adapte, il te connaît";
+    Object.assign(sub.style, { fontSize: '0.85rem', color: '#7744aa', margin: '0 0 32px', letterSpacing: '0.06em' });
+
+    // Règles du jeu
+    const rules = document.createElement('div');
+    Object.assign(rules.style, { display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '38px', fontSize: '0.84rem' });
+
+    const items: [string, string, string, string][] = [
+      ['●', '#00ccff',  `SCAN — ${ROUND_CONFIGS[0].observeTime}s obs + ${ROUND_CONFIGS[0].duelTime}s duel`,  "L'IA mémorise tes déplacements"],
+      ['●', '#cc66ff',  `APPRENTISSAGE — ${ROUND_CONFIGS[1].observeTime}s + ${ROUND_CONFIGS[1].duelTime}s`, 'Le clone rejoue tes patterns'],
+      ['●', '#ff6600',  `MIROIR PARFAIT — ${ROUND_CONFIGS[2].observeTime}s + ${ROUND_CONFIGS[2].duelTime}s`, 'Il te connaît mieux que toi-même'],
+      ['◆', '#ffffff',  'WASD pour te déplacer', 'Esquive ton clone aussi longtemps que possible'],
+    ];
+    for (const [icon, color, label, desc] of items) {
+      const row = document.createElement('div');
+      Object.assign(row.style, { display: 'flex', alignItems: 'flex-start', gap: '12px' });
+      const ic = document.createElement('span');
+      ic.textContent = icon; ic.style.color = color; ic.style.flexShrink = '0';
+      const col = document.createElement('div');
+      const lbl = document.createElement('div');
+      lbl.textContent = label; lbl.style.color = color;
+      const dsc = document.createElement('div');
+      dsc.textContent = desc;
+      Object.assign(dsc.style, { fontSize: '0.77rem', color: '#554477', marginTop: '2px' });
+      col.appendChild(lbl); col.appendChild(dsc);
+      row.appendChild(ic); row.appendChild(col);
+      rules.appendChild(row);
+    }
+
+    const btn = document.createElement('button');
+    btn.textContent = 'COMMENCER';
+    Object.assign(btn.style, {
+      background: 'transparent', border: '2px solid #cc66ff',
+      color: '#cc66ff', fontSize: '1rem', letterSpacing: '0.2em',
+      padding: '12px 48px', cursor: 'pointer',
+      pointerEvents: 'all', transition: 'background 0.2s, color 0.2s',
+    });
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#cc66ff'; btn.style.color = '#000'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; btn.style.color = '#cc66ff'; });
+    btn.addEventListener('click', () => {
+      ov.style.opacity    = '0';
+      ov.style.transition = 'opacity 0.45s';
+      this.introTimers.push(setTimeout(() => {
+        ov.remove();
+        this.introOverlay = null;
+        this.startPhase(DuelPhase.OBSERVATION);
+      }, 460));
+    });
+
+    ov.appendChild(title);
+    ov.appendChild(sub);
+    ov.appendChild(rules);
+    ov.appendChild(btn);
+    document.body.appendChild(ov);
+    this.introOverlay = ov;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   //  DISPOSE
   // ═══════════════════════════════════════════════════════════════════════════
 
   public async dispose(): Promise<void> {
+    // Timers + listeners
+    this.introTimers.forEach(t => clearTimeout(t));
+    this.introTimers = [];
+    document.removeEventListener('keydown', this.escListener);
+    this.introOverlay?.remove();
+    this.pauseOverlay?.remove();
+
+    // Observer animation anneau
+    if (this.arenaAnimObs) this.scene.onBeforeRenderObservable.remove(this.arenaAnimObs);
+
+    // Scan (O4)
+    if (this.scanObs) this.scene.onBeforeRenderObservable.remove(this.scanObs);
+    this.scanBeam?.dispose();
+    this.scanRoot?.dispose();
+
+    // Aura clone (O1)
+    this.cloneAuraRing2?.dispose();
+    this.cloneAuraRing3?.dispose();
+    this.cloneAuraPs?.stop();
+    this.cloneAuraPs?.dispose();
+    this.cloneAuraPsTex?.dispose();
+
+    // Particules (R5)
+    this.ambientPs?.stop();
+    this.ambientPs?.dispose();
+    this.ambientPsTex?.dispose();
+    this.cloneTrailPs?.stop();
+    this.cloneTrailPs?.dispose();
+    this.cloneTrailTex?.dispose();
+
+    // Environnement arène
+    this.arenaDome?.dispose();
+    this.wallMeshes.forEach(m => m.dispose());
+    this.pillarMeshes.forEach(m => m.dispose());
+    this.pillarLights.forEach(l => l.dispose());
+    this.decalMeshes.forEach(m => m.dispose());
+    this.shadowGen?.dispose();
+    this.playerFollowLight?.dispose();
+    this.cloneFollowLight?.dispose();
+
     if (this.hudOverlay?.parentNode) this.hudOverlay.parentNode.removeChild(this.hudOverlay);
     this.inputRecorder.stopRecording();
     this.dialogueBox.dispose();

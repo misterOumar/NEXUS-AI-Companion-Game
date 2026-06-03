@@ -37,14 +37,14 @@ export class HubScene extends AbstractScene {
   private environment!:      HubEnvironment;
   private glowLayer!:        GlowLayer;
 
-  // Portails — uniquement les 2 jeux existants
+  // Portails — 2 jeux actifs (MirrorDuel désactivé)
   private portals: Map<string, TransformNode> = new Map();
   private portalConfigs: PortalConfig[] = [
     {
       name:        'neuroMaze',
       displayName: 'NEURO MAZE',
       number:      '01',
-      position:    new Vector3(-16, 0, -8),
+      position:    new Vector3(-16, 0, -10),
       color:       new Color3(0.15, 0.95, 0.45),
       sceneName:   'NeuroMazeScene',
       subtitle:    'Labyrinthe Adaptatif',
@@ -53,17 +53,30 @@ export class HubScene extends AbstractScene {
       icon:        'maze',
     },
     {
-      name:        'mirrorDuel',
-      displayName: 'MIRROR DUEL',
+      name:        'infiltration',
+      displayName: 'INFILTRATION',
       number:      '02',
-      position:    new Vector3(16, 0, -8),
-      color:       new Color3(0.75, 0.25, 1.0),
-      sceneName:   'MirrorDuelScene',
-      subtitle:    'Combat contre ton Clone IA',
-      description: "L'IA copie et apprend ton style de combat pour te défier. Bats ton propre reflet avant qu'il ne te surpasse.",
-      tags:        ['IA CLONE', 'COMBAT', 'DUEL'],
-      icon:        'mirror',
+      position:    new Vector3(16, 0, -10),
+      color:       new Color3(0.65, 0.35, 1.0),
+      sceneName:   'InfiltrationScene',
+      subtitle:    'Stealth & Gardes IA',
+      description: "Hacke 4 terminaux et échappe aux gardes robots. Chaque garde a un cône de vision — utilise l'EMP pour te frayer un passage.",
+      tags:        ['STEALTH', 'GARDES IA', 'HACKING'],
+      icon:        'maze',
     },
+    // MirrorDuel retiré temporairement
+    // {
+    //   name:        'mirrorDuel',
+    //   displayName: 'MIRROR DUEL',
+    //   number:      '03',
+    //   position:    new Vector3(0, 0, -20),
+    //   color:       new Color3(0.75, 0.25, 1.0),
+    //   sceneName:   'MirrorDuelScene',
+    //   subtitle:    'Combat contre ton Clone IA',
+    //   description: "L'IA copie et apprend ton style de combat pour te défier.",
+    //   tags:        ['IA CLONE', 'COMBAT', 'DUEL'],
+    //   icon:        'mirror',
+    // },
   ];
 
   // État
@@ -635,13 +648,13 @@ export class HubScene extends AbstractScene {
     this.hasGreeted = true;
     this.greetTimers.push(setTimeout(() => {
       this.echoAI.say(
-        "Bienvenue dans NEXUS. Je suis ECHO, ton compagnon IA. Deux jeux t'attendent — approche-toi d'un portail.",
+        "Bienvenue dans NEXUS. Je suis ECHO. Deux expériences t'attendent — approche-toi d'un portail pour commencer.",
         AdviceType.TIP,
       );
     }, 2000));
     this.greetTimers.push(setTimeout(() => {
       this.echoAI.say(
-        "Chaque jeu utilise une IA différente qui s'adapte à toi. Tes performances sont analysées en temps réel.",
+        "Labyrinthe adaptatif ou infiltration stealth — chaque jeu possède une IA unique qui s'adapte à toi.",
         AdviceType.OBSERVATION,
       );
     }, 10000));

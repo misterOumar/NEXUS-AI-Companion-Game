@@ -10,8 +10,9 @@ import { Engine } from '@/core/Engine';
 import { SceneManager } from '@/core/SceneManager';
 import { InputManager } from '@/core/InputManager';
 import { HubScene } from '@/scenes/HubScene';
-import { MirrorDuelScene } from '@/scenes/MirrorDuelScene';
+// import { MirrorDuelScene } from '@/scenes/MirrorDuelScene'; // désactivé temporairement
 import { NeuroMazeScene } from '@/scenes/NeuroMazeScene';
+import { InfiltrationScene } from '@/scenes/InfiltrationScene';
 
 // Import des loaders Babylon.js
 import '@babylonjs/loaders/glTF';
@@ -40,9 +41,9 @@ async function initGame(): Promise<void> {
 
     // Enregistre les scènes
     sceneManager.registerScene('HubScene', HubScene);
-    sceneManager.registerScene('MirrorDuelScene', MirrorDuelScene);
     sceneManager.registerScene('NeuroMazeScene', NeuroMazeScene);
-    // sceneManager.registerScene('MindRushScene', MindRushScene);
+    sceneManager.registerScene('InfiltrationScene', InfiltrationScene);
+    // sceneManager.registerScene('MirrorDuelScene', MirrorDuelScene); // désactivé temporairement
 
     console.log('✅ Scènes enregistrées');
 
