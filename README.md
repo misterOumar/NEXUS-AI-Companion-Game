@@ -7,6 +7,8 @@ Université de Rennes 1 · MIAGE
 
 **Jouer en ligne :** [https://nexus-ai-companion-game.vercel.app/](https://nexus-ai-companion-game.vercel.app/)
 
+**Vidéo de démo :** [https://youtu.be/XanRjzyY9QE](https://youtu.be/XanRjzyY9QE)
+
 ---
 
 ## Les jeux
